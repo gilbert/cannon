@@ -597,6 +597,11 @@ const commandsConfig = {
     ],
     options: [
       {
+        flags: '--forge-cmd [cmd]',
+        description: 'Use a different command (such as coverage) when running forge',
+        defaultValue: 'test',
+      },
+      {
         flags: '-n --provider-url [url]',
         description: 'RPC endpoint to fork off of',
       },

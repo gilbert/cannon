@@ -609,7 +609,9 @@ applyCommandsConfig(program.command('test'), commandsConfig.test).action(async f
   await writeModuleDeployments(path.join(process.cwd(), 'deployments/test'), '', outputs);
 
   // after the build is done we can run the forge tests for the user
-  const forgeCmd = spawn('forge', ['test', '--fork-url', node!.host, ...forgeOpts]);
+  // mine a block so that the latest block is not not existing
+  await getProvider(node!).send('evm_mine', []);
+  const forgeCmd = spawn('forge', [opts.forgeCmd, '--fork-url', node!.host, ...forgeOpts]);
 
   forgeCmd.stdout.on('data', (data: Buffer) => {
     process.stdout.write(data);
