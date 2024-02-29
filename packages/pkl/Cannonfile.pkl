@@ -1,0 +1,37 @@
+module Cannonfile
+
+import "@toml/toml.pkl"
+
+
+name: String
+version: String
+description: String?
+
+abstract class Step {
+  depends: Listing<String>?
+}
+
+class Overrides {
+  gasLimit: Int?
+}
+
+class Contract extends Step {
+  artifact: String
+  highlight: Boolean?
+  create2: Boolean?
+  from: String?
+  nonce: (String | Int)?
+  abi: String?
+  abiOf: Listing<String>?
+  args: Listing?
+  libraries: Mapping<String, String>?
+  salt: String?
+  value: String?
+  overrides: Overrides?
+}
+
+contract: Mapping<String, Contract>
+
+output {
+  renderer = new toml.Renderer {}
+}

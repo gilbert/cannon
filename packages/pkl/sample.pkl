@@ -1,0 +1,16 @@
+amends "Cannonfile.pkl"
+
+name = "testfile"
+version = "0.1.0"
+
+contract {
+  ["greeter"] {
+    artifact = "Greeter"
+    args {
+      "woot"
+      "why" 
+    }
+  }
+}
+  
+
