@@ -25,7 +25,7 @@ import { getMainLoader } from './loader';
 import { installPlugin, listInstalledPlugins, removePlugin } from './plugins';
 import { createDefaultReadRegistry } from './registry';
 import { CannonRpcNode, getProvider, runRpc } from './rpc';
-import { resolveCliSettings } from './settings';
+import { resolveCliSettings, saveFileSettings } from './settings';
 import { PackageSpecification } from './types';
 import { pickAnvilOptions } from './util/anvil';
 import { doBuild } from './util/build';
@@ -34,6 +34,7 @@ import { parsePackageArguments, parsePackagesArguments } from './util/params';
 import { resolveRegistryProvider, resolveWriteProvider } from './util/provider';
 import { writeModuleDeployments } from './util/write-deployments';
 import './custom-steps/run';
+import { isIpfsGateway } from '@usecannon/builder/dist/ipfs';
 
 export * from './types';
 export * from './constants';
@@ -302,6 +303,33 @@ applyCommandsConfig(program.command('publish'), commandsConfig.publish).action(a
 
   const cliSettings = resolveCliSettings(options);
 
+  if (!options.publishIpfsUrl && !cliSettings.publishIpfsUrl) {
+    console.log(
+      'In order to publish to registry, a IPFS endpoint, called "publish ipfs provider" is required. Learn how to set up your IPFS at .'
+    );
+    const ipfsUrlPrompt = await prompts({
+      type: 'text',
+      name: 'value',
+      message: 'Please supply your IPFS API endpoint url:',
+    });
+
+    if (!ipfsUrlPrompt.value) {
+      console.log('IPFS Publish URL is required.');
+      process.exit(1);
+    }
+
+    // test IPFS url
+    if (await isIpfsGateway(ipfsUrlPrompt.value)) {
+      console.error('IPFS URL appears invalid');
+    }
+    // save IPFS url permanently to cannon configuration file
+    saveFileSettings({ publishIpfsUrl: ipfsUrlPrompt.value });
+
+    console.log('IPFS URL saved.');
+
+    options.publishIpfsUrl = ipfsUrlPrompt.value;
+  }
+
   if (!options.chainId) {
     const chainIdPrompt = await prompts({
       type: 'number',
@@ -367,6 +395,7 @@ applyCommandsConfig(program.command('publish'), commandsConfig.publish).action(a
   await publish({
     packageRef,
     provider,
+    publishIpfsUrl: options.publishIpfsUrl || cliSettings.publishIpfsUrl,
     signer: signers[0],
     tags: options.tags ? options.tags.split(',') : undefined,
     chainId: options.chainId ? Number.parseInt(options.chainId) : undefined,

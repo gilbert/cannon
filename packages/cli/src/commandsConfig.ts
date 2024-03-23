@@ -401,6 +401,10 @@ const commandsConfig = {
         description: 'RPC endpoint to publish to',
       },
       {
+        flags: '--publish-ipfs-url [url]',
+        description: 'IPFS API node endpoint to publish to',
+      },
+      {
         flags: '--private-key <key>',
         description: 'Private key to use for publishing the registry package',
       },

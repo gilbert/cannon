@@ -212,4 +212,30 @@ function _resolveCliSettings(overrides: Partial<CliSettings> = {}): CliSettings 
   return finalSettings;
 }
 
+export function getCliSettingsFile() {
+  return untildify(path.join(process.env.CANNON_DIRECTORY || DEFAULT_CANNON_DIRECTORY, CLI_SETTINGS_STORE));
+}
+
+export function readFileSettings() {
+  debug('reading from cli settings');
+
+  const cliSettingsStore = getCliSettingsFile();
+
+  const fileSettings: Omit<CliSettings, 'cannonDirectory'> = fs.existsSync(cliSettingsStore)
+    ? fs.readJsonSync(cliSettingsStore)
+    : {};
+
+  return fileSettings;
+}
+
+export function saveFileSettings(overwriteSettings: Partial<CliSettings>) {
+  debug('saving new cli settings', overwriteSettings);
+
+  const newFileSettings = Object.assign(readFileSettings(), overwriteSettings);
+
+  fs.writeJsonSync(getCliSettingsFile(), newFileSettings);
+
+  return newFileSettings;
+}
+
 export const resolveCliSettings = _.memoize(_resolveCliSettings);

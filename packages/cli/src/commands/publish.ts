@@ -12,6 +12,7 @@ interface Params {
   signer: CannonSigner;
   provider: viem.PublicClient;
   tags: string[];
+  publishIpfsUrl: string;
   chainId?: number;
   presetArg?: string;
   quiet?: boolean;
@@ -37,6 +38,7 @@ export async function publish({
   signer,
   provider,
   tags = ['latest'],
+  publishIpfsUrl,
   chainId,
   presetArg,
   quiet = false,
@@ -48,11 +50,6 @@ export async function publish({
 
   // Ensure publish ipfs url is set
   const cliSettings = resolveCliSettings();
-  if (!cliSettings.publishIpfsUrl) {
-    throw new Error(
-      `In order to publish, a publishIpfsUrl setting must be set in your Cannon configuration. Use '${process.argv[0]} setup' to configure.`
-    );
-  }
 
   // Handle deprecated preset specification
   if (presetArg && !packageRef.startsWith('@')) {
@@ -79,7 +76,7 @@ export async function publish({
     overrides,
   });
   const toStorage = new CannonStorage(onChainRegistry, {
-    ipfs: new IPFSLoader(cliSettings.publishIpfsUrl),
+    ipfs: new IPFSLoader(publishIpfsUrl),
   });
 
   // Generate CannonStorage to retrieve the local instance of the package
