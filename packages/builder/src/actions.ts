@@ -2,13 +2,15 @@ import { z } from 'zod';
 import { handleZodErrors } from './error/zod';
 import { ChainBuilderRuntime } from './runtime';
 import { chainDefinitionSchema } from './schemas';
-import contractSpec from './steps/contract';
-import importSpec from './steps/import';
+import cloneSpec from './steps/clone';
+import deploySpec from './steps/deploy';
 import invokeSpec from './steps/invoke';
 import keeperSpec from './steps/keeper';
-import provisionSpec from './steps/provision';
+import pullSpec from './steps/pull';
 import routerSpec from './steps/router';
+import varSpec from './steps/var';
 import { ChainArtifacts, ChainBuilderContext, ChainBuilderContextWithHelpers, PackageState } from './types';
+import { AccessComputationResult } from './access-recorder';
 
 export interface CannonAction {
   label: string;
@@ -25,7 +27,7 @@ export interface CannonAction {
   /**
    * Returns a list of state keys that this step consumes (used for dependency inference)
    */
-  getInputs?: (config: any, packageState: PackageState) => string[];
+  getInputs?: (config: any, packageState: PackageState) => AccessComputationResult;
 
   /**
    * Returns a list of state keys this step produces (used for dependency inference)
@@ -84,7 +86,7 @@ export function validateConfig(schema: z.ZodSchema, config: any) {
 
 export function registerAction(action: CannonAction) {
   if (typeof action.label !== 'string') {
-    throw new Error('missing "label" property on plugin definition');
+    throw new Error(`missing "label" property on plugin definition ${JSON.stringify(action)}`);
   }
 
   const { label } = action;
@@ -105,9 +107,16 @@ export function registerAction(action: CannonAction) {
   )[label] = { values: action.validate };
 }
 
-registerAction(contractSpec);
-registerAction(importSpec);
+registerAction(deploySpec);
+registerAction(pullSpec);
 registerAction(invokeSpec);
 registerAction(keeperSpec);
-registerAction(provisionSpec);
+registerAction(cloneSpec);
 registerAction(routerSpec);
+registerAction(varSpec);
+
+// backwards compatibility
+registerAction(Object.assign({}, deploySpec, { label: 'contract' }));
+registerAction(Object.assign({}, pullSpec, { label: 'import' }));
+registerAction(Object.assign({}, cloneSpec, { label: 'provision' }));
+registerAction(Object.assign({}, varSpec, { label: 'setting' }));

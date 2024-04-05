@@ -112,7 +112,7 @@ export class ChainBuilderRuntime extends CannonStorage implements ChainBuilderRu
   readonly getArtifact: (name: string) => Promise<ContractArtifact>;
   readonly snapshots: boolean;
   readonly allowPartialDeploy: boolean;
-  readonly publicSourceCode: boolean | undefined;
+  private publicSourceCode: boolean | undefined;
   private signals: { cancelled: boolean } = { cancelled: false };
   private _gasPrice: string | undefined;
   private _gasFee: string | undefined;
@@ -156,8 +156,6 @@ export class ChainBuilderRuntime extends CannonStorage implements ChainBuilderRu
     this.snapshots = info.snapshots;
 
     this.allowPartialDeploy = info.allowPartialDeploy;
-
-    this.publicSourceCode = info.publicSourceCode;
 
     this.misc = { artifacts: {} };
 
@@ -210,6 +208,8 @@ export class ChainBuilderRuntime extends CannonStorage implements ChainBuilderRu
     if (this.snapshots) {
       debug('load state', stateDump.length);
       await (this.provider as viem.TestClient & viem.PublicClient).loadState({ state: stateDump });
+      // after loading state, sometimes block cannot be found during waitForTransactionReceipt check. So just mine a block to ensure it exists
+      await (this.provider as viem.TestClient & viem.PublicClient).mine({ blocks: 1 });
     }
   }
 
@@ -261,6 +261,10 @@ export class ChainBuilderRuntime extends CannonStorage implements ChainBuilderRu
 
   updateProviderArtifacts(artifacts: ChainArtifacts) {
     this.provider = this.provider.extend(traceActions(artifacts) as any);
+  }
+
+  setPublicSourceCode(isPublic: boolean) {
+    this.publicSourceCode = isPublic;
   }
 
   derive(overrides: Partial<ChainBuilderRuntimeInfo>): ChainBuilderRuntime {

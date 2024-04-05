@@ -5,8 +5,6 @@ import _ from 'lodash';
 
 import type { RawChainDefinition } from './actions';
 
-export type OptionTypesTs = string | number | boolean;
-
 // loosely based on the hardhat `Artifact` type
 export type ContractArtifact = {
   contractName: string;
@@ -33,8 +31,6 @@ export type ContractData = {
   abi: Abi;
   constructorArgs?: any[]; // only needed for external verification
   linkedLibraries?: { [sourceName: string]: { [libName: string]: string } }; // only needed for external verification
-  // only should be supplied when generated solidity as a single file
-  sourceCode?: string;
   deployTxnHash: string;
   contractName: string;
   sourceName: string;
@@ -71,18 +67,23 @@ export interface PreChainBuilderContext {
   package: any;
 
   timestamp: string;
+
+  overrideSettings: { [label: string]: string };
 }
 
 export interface ChainBuilderContext extends PreChainBuilderContext {
-  settings: ChainBuilderOptions;
-
   contracts: ContractMap;
 
   txns: TransactionMap;
 
-  extras: { [label: string]: string };
+  settings: { [label: string]: string };
+
+  // Legacy
+  extras?: { [label: string]: string };
 
   imports: BundledChainBuilderOutputs;
+
+  [shortContract: string]: any;
 }
 
 const etherUnitNames = ['wei', 'kwei', 'mwei', 'gwei', 'szabo', 'finney', 'ether'];
@@ -111,7 +112,7 @@ export const CannonHelperContext = {
 
   zeroPad: (a: viem.Hex, s: number) => viem.padHex(a, { size: s }),
   hexZeroPad: (a: viem.Hex, s: number) => viem.padHex(a, { size: s }),
-  hexlify: (v: viem.ByteArray) => viem.toHex(v),
+  hexlify: viem.toHex,
   stripZeros: viem.trim,
   formatBytes32String: (v: string) => viem.stringToHex(v, { size: 32 }),
   parseBytes32String: (v: viem.Hex) => viem.hexToString(v, { size: 32 }),
@@ -152,7 +153,7 @@ export const CannonHelperContext = {
 
 export type ChainBuilderContextWithHelpers = ChainBuilderContext & typeof CannonHelperContext;
 
-export type BuildOptions = { [val: string]: OptionTypesTs };
+export type BuildOptions = { [val: string]: string };
 
 export type StorageMode = 'all' | 'metadata' | 'none';
 
@@ -182,9 +183,6 @@ export interface ChainBuilderRuntimeInfo {
   // Should gracefully continue after failures and return a partial release?
   allowPartialDeploy: boolean;
 
-  // Should publish contract sources along with bytecode?
-  publicSourceCode?: boolean;
-
   // Gas price to use for transactions
   gasPrice?: string;
 
@@ -205,10 +203,10 @@ export interface BundledChainBuilderOutputs {
   [module: string]: BundledOutput;
 }
 
-export type ChainArtifacts = Partial<Pick<ChainBuilderContext, 'imports' | 'contracts' | 'txns' | 'extras'>>;
+export type ChainArtifacts = Partial<Pick<ChainBuilderContext, 'imports' | 'contracts' | 'txns' | 'settings' | 'extras'>>;
 
 export interface ChainBuilderOptions {
-  [key: string]: OptionTypesTs;
+  [key: string]: string;
 }
 
 /**
@@ -299,7 +297,7 @@ export function combineCtx(ctxs: ChainBuilderContext[]): ChainBuilderContext {
     ctx.contracts = { ...ctx.contracts, ...additionalCtx.contracts };
     ctx.txns = { ...ctx.txns, ...additionalCtx.txns };
     ctx.imports = { ...ctx.imports, ...additionalCtx.imports };
-    ctx.extras = { ...ctx.extras, ...additionalCtx.extras };
+    ctx.settings = { ...ctx.settings, ...additionalCtx.settings };
   }
 
   return ctx;

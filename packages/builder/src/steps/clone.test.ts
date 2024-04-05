@@ -1,19 +1,14 @@
 import { BUILD_VERSION } from '../constants';
 import { InMemoryRegistry } from '../registry';
-import { contractSchema } from '../schemas';
-import contractAction from './contract';
-import action from './provision';
+import deployAction from './deploy';
+import action from './clone';
 import { fakeCtx, fakeRuntime } from './utils.test.helper';
 import '../actions';
 
 jest.mock('../loader');
-jest.mock('./contract');
+jest.mock('./deploy');
 
-// Mocking the contract action causes a weird bug with the zod schema
-// this mock just replaces the mock generated value with our imported value.
-jest.mocked((contractAction.validate = contractSchema));
-
-describe('steps/provision.ts', () => {
+describe('steps/clone.ts', () => {
   const registry = new InMemoryRegistry();
 
   beforeAll(async () => {
@@ -22,10 +17,10 @@ describe('steps/provision.ts', () => {
 
     jest.mocked(fakeRuntime.derive).mockReturnThis();
 
-    jest.mocked(contractAction.getOutputs).mockReturnValue([]);
-    jest.mocked(contractAction.getInputs).mockReturnValue([]);
+    jest.mocked(deployAction.getOutputs).mockReturnValue([]);
+    jest.mocked(deployAction.getInputs).mockReturnValue({ accesses: [], unableToCompute: false });
 
-    jest.mocked(contractAction.exec).mockResolvedValue({
+    jest.mocked(deployAction.exec).mockResolvedValue({
       contracts: {
         Woot: {
           address: '0xfoobar',
@@ -33,12 +28,14 @@ describe('steps/provision.ts', () => {
           deployTxnHash: '0x',
           contractName: 'Woot',
           sourceName: 'Woot.sol',
-          deployedOn: 'contract.Woot',
+          deployedOn: 'deploy.Woot',
           gasCost: '0',
           gasUsed: 0,
         },
       },
     });
+
+    jest.mocked(deployAction.validate.safeParse).mockReturnValue({ success: true } as any);
   });
 
   describe('configInject()', () => {
@@ -48,7 +45,7 @@ describe('steps/provision.ts', () => {
         {
           source: '<%= settings.a %><%= settings.b %><%= settings.c %>',
         },
-        { name: 'who', version: '1.0.0', currentLabel: 'provision.whatever' }
+        { name: 'who', version: '1.0.0', currentLabel: 'clone.whatever' }
       );
 
       expect(result).toStrictEqual({
@@ -60,49 +57,24 @@ describe('steps/provision.ts', () => {
   });
 
   describe('getState()', () => {
-    it('resolves correct properties with minimal config', async () => {
+    it('always resolves to reexecute', async () => {
       await registry.publish(['hello:1.0.0@main'], 13370, 'https://something.com', '');
-
-      const result = await action.getState(
-        fakeRuntime,
-        fakeCtx,
-        { source: 'hello:1.0.0' },
-        { name: 'who', version: '1.0.0', currentLabel: 'provision.whatever' }
-      );
-
-      expect(result).toContainEqual({
-        url: 'https://something.com',
-        options: undefined,
-        targetPreset: 'with-who',
-      });
-    });
-
-    it('resolves correct properties with maximal config', async () => {
-      await registry.publish(['hello:1.0.0@main'], 1234, 'https://something-else.com', '');
-
-      const result = await action.getState(
-        fakeRuntime,
-        fakeCtx,
-        { source: 'hello:1.0.0', sourcePreset: 'main', chainId: 1234, targetPreset: 'voop', options: { bar: 'baz' } },
-        { name: 'who', version: '1.0.0', currentLabel: 'provision.whatever' }
-      );
-
-      expect(result).toContainEqual({
-        url: 'https://something-else.com',
-        options: { bar: 'baz' },
-        targetPreset: 'voop',
-      });
+      const result = await action.getState();
+      expect(result).toEqual([]);
     });
   });
 
   describe('exec()', () => {
+    beforeEach(() => {
+      jest.mocked(fakeRuntime.isCancelled).mockReturnValue(false);
+    });
     it('throws if deployment not found', async () => {
       await expect(() =>
         action.exec(
           fakeRuntime,
           fakeCtx,
           { source: 'undefined-deployment:1.0.0' },
-          { name: 'package', version: '1.0.0', currentLabel: 'provision.whatever' }
+          { name: 'package', version: '1.0.0', currentLabel: 'clone.whatever' }
         )
       ).rejects.toThrowError('deployment not found');
     });
@@ -114,7 +86,7 @@ describe('steps/provision.ts', () => {
         generator: 'cannon test',
         timestamp: 1234,
         state: {
-          'contract.Woot': {
+          'deploy.Woot': {
             version: BUILD_VERSION,
             hash: 'arst',
             artifacts: {
@@ -125,7 +97,7 @@ describe('steps/provision.ts', () => {
                   deployTxnHash: '0x',
                   contractName: 'Woot',
                   sourceName: 'Woot.sol',
-                  deployedOn: 'contract.Woot',
+                  deployedOn: 'deploy.Woot',
                   gasCost: '0',
                   gasUsed: 0,
                 },
@@ -137,8 +109,10 @@ describe('steps/provision.ts', () => {
         def: {
           name: 'hello',
           version: '1.0.0',
-          contract: {
-            Woot: { artifact: 'Woot' },
+          var: {
+            main: {
+              sophisticated: 'fast',
+            },
           },
         } as any,
         meta: {},
@@ -152,14 +126,12 @@ describe('steps/provision.ts', () => {
         fakeRuntime,
         fakeCtx,
         { source: 'hello:1.0.0@main' },
-        { name: 'package', version: '1.0.0', currentLabel: 'import.something' }
+        { name: 'package', version: '1.0.0', currentLabel: 'clone.something' }
       );
 
       expect(result.imports!['something'].url).toEqual('ipfs://Qmsomething');
 
       expect(jest.mocked(fakeRuntime.putDeploy).mock.calls[0][0].status).toEqual('partial');
-
-      jest.mocked(fakeRuntime.isCancelled).mockReturnValue(false);
     });
 
     it('works with complete deployment', async () => {
@@ -169,7 +141,7 @@ describe('steps/provision.ts', () => {
         generator: 'cannon test',
         timestamp: 1234,
         state: {
-          'contract.Woot': {
+          'deploy.Woot': {
             version: BUILD_VERSION,
             hash: 'arst',
             artifacts: {
@@ -180,7 +152,7 @@ describe('steps/provision.ts', () => {
                   deployTxnHash: '0x',
                   contractName: 'Woot',
                   sourceName: 'Woot.sol',
-                  deployedOn: 'contract.Woot',
+                  deployedOn: 'deploy.Woot',
                   gasCost: '0',
                   gasUsed: 0,
                 },
@@ -192,8 +164,10 @@ describe('steps/provision.ts', () => {
         def: {
           name: 'hello',
           version: '1.0.0',
-          contract: {
-            Woot: { artifact: 'Woot' },
+          var: {
+            main: {
+              sophisticated: 'fast',
+            },
           },
         } as any,
         meta: {},
@@ -206,7 +180,7 @@ describe('steps/provision.ts', () => {
         fakeRuntime,
         fakeCtx,
         { source: 'hello:1.0.0' },
-        { name: 'package', version: '1.0.0', currentLabel: 'import.something' }
+        { name: 'package', version: '1.0.0', currentLabel: 'clone.something' }
       );
 
       expect(result).toStrictEqual({
@@ -215,21 +189,39 @@ describe('steps/provision.ts', () => {
             url: 'ipfs://Qmsomething',
             preset: 'main',
             tags: ['latest'],
-            contracts: {
-              Woot: {
-                address: '0xfoobar',
-                abi: [],
-                deployTxnHash: '0x',
-                contractName: 'Woot',
-                sourceName: 'Woot.sol',
-                deployedOn: 'contract.Woot',
-                gasCost: '0',
-                gasUsed: 0,
-              },
+            settings: {
+              sophisticated: 'fast',
             },
           },
         },
       });
+    });
+
+    it('if deployment comes back the same, does not change deployment url', async () => {
+      jest.mocked(fakeRuntime.putDeploy).mockResolvedValue('ipfs://Qmdoit');
+
+      const firstResult = await action.exec(
+        fakeRuntime,
+        fakeCtx,
+        { source: 'hello:1.0.0' },
+        { name: 'package', version: '1.0.0', currentLabel: 'clone.something' }
+      );
+
+      const savedData = jest.mocked(fakeRuntime.putDeploy).mock.calls[0][0];
+
+      jest.mocked(fakeRuntime.readBlob).mockResolvedValue(savedData);
+      jest.mocked(fakeRuntime.putDeploy).mockResolvedValue('ipfs://Qmdoitelse');
+
+      const newCtx = Object.assign({}, fakeCtx, firstResult);
+
+      const finalResult = await action.exec(
+        fakeRuntime,
+        newCtx,
+        { source: 'hello:1.0.0' },
+        { name: 'package', version: '1.0.0', currentLabel: 'clone.something' }
+      );
+
+      expect(finalResult.imports?.something?.url).toEqual('ipfs://Qmdoit');
     });
   });
 });

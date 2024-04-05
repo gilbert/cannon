@@ -36,7 +36,7 @@ export async function getExecutionSigner(
   const address = ('0x' + hash.slice(0, 40)) as viem.Address;
 
   await provider.impersonateAccount({ address });
-  await provider.setBalance({ address, value: BigInt(1e22) });
+  await provider.setBalance({ address, value: viem.parseEther('10000') });
 
   const client = viem.createWalletClient({
     account: address,
@@ -163,4 +163,11 @@ ${def.allActionNames.join('\n')}`);
   }
 
   return str;
+}
+
+// Noticed that viem is not adding the '0x' at the beggining, contratry to what
+// the docs say, so just keeping the check in case is needed in the future.
+export function encodeDeployData(...args: Parameters<typeof viem.encodeDeployData>) {
+  const data = viem.encodeDeployData(...args);
+  return data.startsWith('0x') ? data : (`0x${data}` as viem.Hex);
 }

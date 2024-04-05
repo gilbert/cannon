@@ -25,26 +25,11 @@ export async function createInitialContext(
     package: pkg,
     timestamp: Math.floor(Date.now() / 1000).toString(),
     chainId,
+    overrideSettings: opts,
   };
-
-  const settings: ChainBuilderContext['settings'] = {};
-
-  const pkgSettings = def.getSettings(preCtx);
-
-  for (const s in pkgSettings) {
-    if (opts[s] !== undefined) {
-      settings[s] = opts[s];
-    } else if (pkgSettings[s].defaultValue !== undefined) {
-      settings[s] = pkgSettings[s].defaultValue!;
-    } else {
-      throw new Error(`Required setting not supplied: ${s}`);
-    }
-  }
 
   return {
     ...preCtx,
-
-    settings,
 
     contracts: {},
 
@@ -52,7 +37,7 @@ export async function createInitialContext(
 
     imports: {},
 
-    extras: {},
+    settings: _.clone(opts),
   };
 }
 
@@ -88,6 +73,9 @@ ${printChainDefinitionProblems(problems)}`);
   const name = def.getName(initialCtx);
   const version = def.getVersion(initialCtx);
 
+  // whether or not source code is included in deployment artifacts or not is controlled by cannonfile config, so we set it here
+  runtime.setPublicSourceCode(def.isPublicSourceCode());
+
   try {
     if (runtime.snapshots) {
       debug('building by layer');
@@ -101,6 +89,7 @@ ${printChainDefinitionProblems(problems)}`);
       doActions: for (const n of topologicalActions) {
         debug(`check action ${n}`);
         if (runtime.isCancelled()) {
+          debug('runtime cancelled');
           break;
         }
 
@@ -156,7 +145,7 @@ ${printChainDefinitionProblems(problems)}`);
 
           built.set(n, _.merge(artifacts, state[n].artifacts));
         } catch (err: any) {
-          debug(`got error ${err}`);
+          debug('got error', err);
           if (runtime.allowPartialDeploy) {
             runtime.emit(Events.SkipDeploy, n, err, 0);
             continue; // will skip saving the build artifacts, which should block any future jobs from finishing
@@ -266,7 +255,12 @@ export async function buildLayer(
     await runtime.clearNode();
 
     for (const dep of layer.depends) {
-      await runtime.loadState(state[dep].chainDump!);
+      if (state[dep].chainDump) {
+        // chain dump may not exist if the package is a little older
+        await runtime.loadState(state[dep].chainDump!);
+      } else {
+        debug('warning: chain dump not recorded for layer:', dep);
+      }
     }
 
     for (const action of layer.actions) {
@@ -375,7 +369,11 @@ export async function getOutputs(
         }
       }
 
-      await runtime.loadState(state[layer.actions[0]].chainDump!);
+      if (state[layer.actions[0]]?.chainDump) {
+        await runtime.loadState(state[layer.actions[0]].chainDump!);
+      } else {
+        debug(`warning: state dump not recorded for ${layer.actions[0]}`);
+      }
     }
   }
 
@@ -383,26 +381,76 @@ export async function getOutputs(
 }
 
 // TODO: this func is dumb but I need to walk through this time period before I want to turn it into something of beauty
-function addOutputsToContext(ctx: ChainBuilderContext, outputs: ChainArtifacts) {
+export function addOutputsToContext(ctx: ChainBuilderContext, outputs: ChainArtifacts) {
   const imports = outputs.imports;
-
   for (const imp in imports) {
     ctx.imports[imp] = imports[imp];
   }
 
-  const contracts = outputs.contracts as ContractMap;
+  //helper function for recursively adding simplified imports notation
+  function addImports(ctx: ChainBuilderContext, imports: any, parentObject: any = null): void {
+    Object.keys(imports).forEach((key) => {
+      const currentImport = imports[key];
+      let targetObject = parentObject;
 
-  for (const contract in contracts) {
-    ctx.contracts[contract] = contracts[contract];
+      if (!targetObject) {
+        targetObject = ctx;
+      }
+
+      if (!targetObject[key]) {
+        targetObject[key] = { url: currentImport.url };
+      } else {
+        targetObject[key].url = currentImport.url;
+      }
+
+      if (currentImport.imports && Object.keys(currentImport.imports).length > 0) {
+        addImports(ctx, currentImport.imports, targetObject[key]);
+      }
+
+      if (currentImport.contracts && Object.keys(currentImport.contracts).length > 0) {
+        targetObject[key].contracts = currentImport.contracts;
+      }
+    });
+  }
+
+  //add simplified imports syntax
+  if (imports) {
+    addImports(ctx, outputs.imports);
+  }
+
+  const contracts = outputs.contracts as ContractMap;
+  for (const contractName in contracts) {
+    ctx.contracts[contractName] = contracts[contractName];
+    //also add simplified address syntax
+    const contractData = contracts[contractName];
+    if (contractData && contractData.address) {
+      const simplifiedPath = `${contractName}.address`;
+      ctx[simplifiedPath] = contractData.address;
+    }
   }
 
   const txns = outputs.txns as TransactionMap;
-
   for (const txn in txns) {
     ctx.txns[txn] = txns[txn];
   }
 
+  for (const n in outputs.settings) {
+    ctx.settings[n] = outputs.settings[n];
+  }
+
+  if (!ctx.extras) {
+    ctx.extras = {};
+  }
+
   for (const n in outputs.extras) {
     ctx.extras[n] = outputs.extras[n];
+  }
+
+  for (const override in ctx.overrideSettings) {
+    ctx.settings[override] = ctx.overrideSettings[override];
+  }
+
+  for (const n in ctx.settings) {
+    ctx.extras[n] = ctx.settings[n];
   }
 }

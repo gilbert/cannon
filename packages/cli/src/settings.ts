@@ -1,19 +1,13 @@
 import Debug from 'debug';
-import { z } from 'zod';
-import { parseEnv } from 'znv';
 import fs from 'fs-extra';
 import _ from 'lodash';
 import path from 'path';
 import untildify from 'untildify';
-import {
-  CLI_SETTINGS_STORE,
-  DEFAULT_REGISTRY_ADDRESS,
-  DEFAULT_CANNON_DIRECTORY,
-  DEFAULT_REGISTRY_PROVIDER_URL,
-} from './constants';
-import { filterSettings } from './helpers';
 import * as viem from 'viem';
-import { Address, Hash } from 'viem';
+import { parseEnv } from 'znv';
+import { z } from 'zod';
+import { CLI_SETTINGS_STORE, DEFAULT_CANNON_DIRECTORY, DEFAULT_REGISTRY_CONFIG } from './constants';
+import { filterSettings } from './helpers';
 
 const debug = Debug('cannon:cli:settings');
 
@@ -29,7 +23,12 @@ export type CliSettings = {
   /**
    * private key(s) of default signer that should be used for build, comma separated
    */
-  privateKey?: Hash;
+  privateKey?: viem.Hash;
+
+  /**
+   * The amount of times ipfs should retry requests (applies to read and write)
+   */
+  ipfsRetries?: number;
 
   /**
    * the url of the IPFS endpoint to use as a storage base. defaults to localhost IPFS
@@ -42,19 +41,15 @@ export type CliSettings = {
   publishIpfsUrl?: string;
 
   /**
-   * URL to use to write a package to the registry. Defaults to `frame,${DEFAULT_REGISTRY_PROVIDER_URL}`
+   * List of registries that should be read from to find packages.
+   * Earlier registries in the array get priority for resolved packages over later ones.
+   * First registry on the list is the one that handles setPackageOwnership() calls to create packages.
    */
-  registryProviderUrl: string;
-
-  /**
-   * chain Id of the registry. Defaults to `1`. Overridden by `registryProviderUrl`
-   */
-  registryChainId: string;
-
-  /**
-   * Address of the registry
-   */
-  registryAddress: Address;
+  registries: {
+    chainId: number;
+    providerUrl: string[];
+    address: viem.Address;
+  }[];
 
   /**
    * Which registry to read from first. Defaults to `onchain`
@@ -118,6 +113,7 @@ function cannonSettingsSchema(fileSettings: Omit<CliSettings, 'cannonDirectory'>
       .refine((val) => viem.isHash(val), { message: 'Private key is invalid' })
       .optional()
       .default(fileSettings.privateKey as string),
+    CANNON_IPFS_RETRIES: z.number().optional().default(3),
     CANNON_IPFS_URL: z
       .string()
       .url()
@@ -128,15 +124,12 @@ function cannonSettingsSchema(fileSettings: Omit<CliSettings, 'cannonDirectory'>
       .url()
       .optional()
       .default(fileSettings.publishIpfsUrl as string),
-    CANNON_REGISTRY_PROVIDER_URL: z
-      .string()
-      .default(fileSettings.registryProviderUrl || `${DEFAULT_REGISTRY_PROVIDER_URL},frame`),
-    CANNON_REGISTRY_CHAIN_ID: z.string().default(fileSettings.registryChainId || '1'),
+    CANNON_REGISTRY_PROVIDER_URL: z.string().optional(),
+    CANNON_REGISTRY_CHAIN_ID: z.string().optional(),
     CANNON_REGISTRY_ADDRESS: z
       .string()
-      .startsWith('0x')
-      .length(42)
-      .default(fileSettings.registryAddress || DEFAULT_REGISTRY_ADDRESS),
+      .optional()
+      .refine((v) => !v || viem.isAddress(v), 'must be address'),
     CANNON_REGISTRY_PRIORITY: z.enum(['onchain', 'local']).default(fileSettings.registryPriority || 'onchain'),
     CANNON_ETHERSCAN_API_URL: z
       .string()
@@ -167,6 +160,7 @@ function _resolveCliSettings(overrides: Partial<CliSettings> = {}): CliSettings 
     CANNON_SETTINGS,
     CANNON_PROVIDER_URL,
     CANNON_PRIVATE_KEY,
+    CANNON_IPFS_RETRIES,
     CANNON_IPFS_URL,
     CANNON_PUBLISH_IPFS_URL,
     CANNON_REGISTRY_PROVIDER_URL,
@@ -185,11 +179,10 @@ function _resolveCliSettings(overrides: Partial<CliSettings> = {}): CliSettings 
       cannonSettings: CANNON_SETTINGS,
       providerUrl: CANNON_PROVIDER_URL,
       privateKey: CANNON_PRIVATE_KEY,
+      ipfsRetries: CANNON_IPFS_RETRIES,
       ipfsUrl: CANNON_IPFS_URL,
       publishIpfsUrl: CANNON_PUBLISH_IPFS_URL,
-      registryProviderUrl: CANNON_REGISTRY_PROVIDER_URL,
-      registryChainId: CANNON_REGISTRY_CHAIN_ID,
-      registryAddress: CANNON_REGISTRY_ADDRESS,
+      registries: [],
       registryPriority: CANNON_REGISTRY_PRIORITY,
       etherscanApiUrl: CANNON_ETHERSCAN_API_URL,
       etherscanApiKey: CANNON_ETHERSCAN_API_KEY,
@@ -198,6 +191,16 @@ function _resolveCliSettings(overrides: Partial<CliSettings> = {}): CliSettings 
     },
     _.pickBy(overrides)
   ) as CliSettings;
+
+  if (CANNON_REGISTRY_PROVIDER_URL && CANNON_REGISTRY_CHAIN_ID) {
+    finalSettings.registries.push({
+      providerUrl: [CANNON_REGISTRY_PROVIDER_URL],
+      chainId: parseInt(CANNON_REGISTRY_CHAIN_ID),
+      address: CANNON_REGISTRY_ADDRESS as viem.Address,
+    });
+  } else {
+    finalSettings.registries = DEFAULT_REGISTRY_CONFIG;
+  }
 
   debug('got settings', filterSettings(finalSettings));
 

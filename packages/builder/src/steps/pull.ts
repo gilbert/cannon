@@ -1,12 +1,12 @@
 import Debug from 'debug';
 import _ from 'lodash';
 import { z } from 'zod';
-import { computeTemplateAccesses } from '../access-recorder';
+import { computeTemplateAccesses, mergeTemplateAccesses } from '../access-recorder';
 import { getOutputs } from '../builder';
 import { ChainDefinition } from '../definition';
 import { PackageReference } from '../package';
 import { ChainBuilderRuntime } from '../runtime';
-import { importSchema } from '../schemas';
+import { pullSchema } from '../schemas';
 import { ChainArtifacts, ChainBuilderContext, ChainBuilderContextWithHelpers, PackageState } from '../types';
 
 const debug = Debug('cannon:builder:import');
@@ -16,7 +16,7 @@ const debug = Debug('cannon:builder:import');
  *  @public
  *  @group Import
  */
-export type Config = z.infer<typeof importSchema>;
+export type Config = z.infer<typeof pullSchema>;
 
 export interface Outputs {
   [key: string]: string;
@@ -25,10 +25,10 @@ export interface Outputs {
 // ensure the specified contract is already deployed
 // if not deployed, deploy the specified hardhat contract with specfied options, export address, abi, etc.
 // if already deployed, reexport deployment options for usage downstream and exit with no changes
-const importSpec = {
-  label: 'import',
+const pullSpec = {
+  label: 'pull',
 
-  validate: importSchema,
+  validate: pullSchema,
 
   async getState(runtime: ChainBuilderRuntime, ctx: ChainBuilderContextWithHelpers, config: Config) {
     const cfg = this.configInject(ctx, config);
@@ -52,16 +52,14 @@ const importSpec = {
     const packageRef = new PackageReference(_.template(config.source)(ctx));
 
     config.source = packageRef.fullPackageRef;
-    config.preset = _.template(config.preset)(ctx);
+    config.preset = _.template(config.preset)(ctx) || packageRef.preset;
 
     return config;
   },
 
   getInputs(config: Config) {
-    const accesses: string[] = [];
-
-    accesses.push(...computeTemplateAccesses(config.source));
-    accesses.push(...computeTemplateAccesses(config.preset));
+    let accesses = computeTemplateAccesses(config.source);
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.preset));
 
     return accesses;
   },
@@ -110,4 +108,4 @@ const importSpec = {
   },
 };
 
-export default importSpec;
+export default pullSpec;

@@ -2,6 +2,7 @@ import {
   build as cannonBuild,
   CANNON_CHAIN_ID,
   CannonRegistry,
+  ChainArtifacts,
   ChainBuilderRuntime,
   ChainDefinition,
   ContractArtifact,
@@ -11,13 +12,13 @@ import {
   getContractFromPath,
   getOutputs,
   PackageReference,
-  ChainArtifacts,
   traceActions,
 } from '@usecannon/builder';
+import { CannonSigner } from '@usecannon/builder/src';
 import { bold, cyanBright, gray, green, magenta, red, yellow, yellowBright } from 'chalk';
-import * as viem from 'viem';
 import _ from 'lodash';
 import { table } from 'table';
+import * as viem from 'viem';
 import pkg from '../../package.json';
 import { getChainById } from '../chains';
 import { readMetadataCache } from '../helpers';
@@ -27,7 +28,6 @@ import { createDefaultReadRegistry } from '../registry';
 import { resolveCliSettings } from '../settings';
 import { PackageSpecification } from '../types';
 import { createWriteScript, WriteScriptFormat } from '../write-script/write';
-import { CannonSigner } from '@usecannon/builder/src';
 
 interface Params {
   provider: viem.PublicClient;
@@ -41,7 +41,6 @@ interface Params {
   getDefaultSigner?: () => Promise<CannonSigner>;
   projectDirectory?: string;
   presetArg?: string;
-  chainId?: number;
   overrideResolver?: CannonRegistry;
   wipe?: boolean;
   persist?: boolean;
@@ -133,7 +132,7 @@ export async function build({
       async function (addr: viem.Address) {
         // on test network any user can be conjured
         await (provider as unknown as viem.TestClient).impersonateAccount({ address: addr });
-        await (provider as unknown as viem.TestClient).setBalance({ address: addr, value: BigInt(1e22) });
+        await (provider as unknown as viem.TestClient).setBalance({ address: addr, value: viem.parseEther('10000') });
 
         return {
           address: addr,
@@ -160,6 +159,119 @@ export async function build({
   const runtime = new ChainBuilderRuntime(runtimeOptions, resolver, getMainLoader(cliSettings), 'ipfs');
 
   const dump = writeScript ? await createWriteScript(runtime, writeScript, writeScriptFormat) : null;
+
+  // Check for existing package
+  let oldDeployData: DeploymentInfo | null = null;
+  const prevPkg = upgradeFrom || fullPackageRef;
+
+  console.log(bold('Checking for existing package...'));
+  oldDeployData = await runtime.readDeploy(prevPkg, runtime.chainId);
+
+  // Update pkgInfo (package.json) with information from existing package, if present
+  if (oldDeployData) {
+    console.log(gray(`    ${fullPackageRef} (Chain ID: ${chainId}) found`));
+    if (!wipe) {
+      await runtime.restoreMisc(oldDeployData.miscUrl);
+
+      if (!pkgInfo) {
+        pkgInfo = oldDeployData.meta;
+      }
+    }
+  } else {
+    if (upgradeFrom) {
+      throw new Error(`    ${prevPkg} (Chain ID: ${chainId}) not found`);
+    } else {
+      console.log(gray(`    ${prevPkg} (Chain ID: ${chainId}) not found`));
+    }
+  }
+
+  const resolvedSettings = _.pickBy(_.assign((!wipe && oldDeployData?.options) || {}, packageDefinition.settings));
+
+  def = def || (oldDeployData ? new ChainDefinition(oldDeployData!.def) : undefined);
+
+  if (!def) {
+    throw new Error('no deployment definition to build');
+  }
+
+  const initialCtx = await createInitialContext(def, pkgInfo, chainId, resolvedSettings);
+
+  if (!pkgName) {
+    pkgName = def.getName(initialCtx);
+  }
+
+  if (!pkgVersion) {
+    pkgVersion = def.getVersion(initialCtx);
+  }
+
+  console.log('');
+  if (oldDeployData && wipe) {
+    console.log('Wiping existing package...');
+    console.log(bold('Initializing new package...'));
+  } else if (oldDeployData && !upgradeFrom) {
+    console.log(bold('Continuing with existing package...'));
+  } else {
+    console.log(bold('Initializing new package...'));
+  }
+  console.log('Name: ' + cyanBright(`${pkgName}`));
+  console.log('Version: ' + cyanBright(`${pkgVersion}`));
+  console.log('Preset: ' + cyanBright(`${preset}`) + (preset == 'main' ? gray(' (default)') : ''));
+  console.log('Chain ID: ' + cyanBright(`${chainId}`));
+  if (upgradeFrom) {
+    console.log(`Upgrading from: ${cyanBright(upgradeFrom)}`);
+  }
+  if (publicSourceCode) {
+    console.log(gray('Source code will be included in the package'));
+  }
+  console.log('');
+
+  const providerUrlMsg =
+    provider.transport.type === 'http'
+      ? provider.transport.url
+      : typeof providerUrl === 'string'
+      ? providerUrl.split(',')[0]
+      : providerUrl;
+  console.log(
+    bold(
+      `Building the chain (ID ${chainId})${
+        providerUrlMsg ? ' via ' + providerUrlMsg.replace(RegExp(/[=A-Za-z0-9_-]{32,}/), '*'.repeat(32)) : ''
+      }...`
+    )
+  );
+
+  let defaultSignerAddress: string;
+  if (getDefaultSigner) {
+    const defaultSigner = await getDefaultSigner!();
+    if (defaultSigner) {
+      defaultSignerAddress = defaultSigner.address;
+      console.log(`Using ${defaultSignerAddress}`);
+    } else {
+      console.log();
+      console.log(bold(red('Signer not found.')));
+      console.log(
+        red(
+          'Provide a signer to execute this build. Add the --private-key option or set the env variable CANNON_PRIVATE_KEY.'
+        )
+      );
+      process.exit(1);
+    }
+  }
+
+  if (!_.isEmpty(resolvedSettings)) {
+    console.log(gray('Overriding settings in the cannonfile with the following:'));
+    for (const [key, value] of Object.entries(resolvedSettings)) {
+      console.log(gray(`  - ${key} = ${value}`));
+    }
+    console.log('');
+  }
+
+  if (plugins) {
+    const pluginList = await listInstalledPlugins();
+
+    if (pluginList.length) {
+      console.log('plugins:', pluginList.join(', '), 'detected');
+    }
+  }
+  console.log('');
 
   let partialDeploy = false;
   runtime.on(Events.PreStepExecute, (t, n, _c, d) =>
@@ -222,8 +334,12 @@ export async function build({
         );
       }
     }
-    for (const extra in o.extras) {
-      console.log(gray(`${'  '.repeat(d)}  Stored Event Data: ${extra} = ${o.extras[extra]}`));
+    for (const setting in o.settings) {
+      if (ctx.overrideSettings[setting]) {
+        console.log(red(`${'  '.repeat(d)}  Overridden Setting: ${setting} = ${ctx.overrideSettings[setting]}`));
+      } else {
+        console.log(gray(`${'  '.repeat(d)}  Setting: ${setting} = ${o.settings[setting]}`));
+      }
     }
     stepsExecuted = true;
 
@@ -236,112 +352,6 @@ export async function build({
   runtime.on(Events.DownloadDeploy, (hash, gateway, d) =>
     console.log(gray(`${'  '.repeat(d)}    Downloading ${hash} via ${gateway}`))
   );
-
-  // Check for existing package
-  let oldDeployData: DeploymentInfo | null = null;
-  const prevPkg = upgradeFrom || fullPackageRef;
-
-  console.log(bold('Checking for existing package...'));
-  oldDeployData = await runtime.readDeploy(prevPkg, runtime.chainId);
-
-  // Update pkgInfo (package.json) with information from existing package, if present
-  if (oldDeployData && !wipe) {
-    console.log(`${fullPackageRef} (Chain ID: ${chainId}) found`);
-    await runtime.restoreMisc(oldDeployData.miscUrl);
-
-    if (!pkgInfo) {
-      pkgInfo = oldDeployData.meta;
-    }
-  } else {
-    if (upgradeFrom) {
-      throw new Error(`${prevPkg} (Chain ID: ${chainId}) not found`);
-    } else {
-      console.log(gray(`${prevPkg} (Chain ID: ${chainId}) not found`));
-    }
-  }
-
-  const resolvedSettings = _.assign(oldDeployData?.options ?? {}, packageDefinition.settings);
-
-  def = def || (oldDeployData ? new ChainDefinition(oldDeployData!.def) : undefined);
-
-  if (!def) {
-    throw new Error('no deployment definition to build');
-  }
-
-  const initialCtx = await createInitialContext(def, pkgInfo, chainId, resolvedSettings);
-
-  if (!pkgName) {
-    pkgName = def.getName(initialCtx);
-  }
-
-  if (!pkgVersion) {
-    pkgVersion = def.getVersion(initialCtx);
-  }
-
-  console.log('');
-  if (oldDeployData && wipe) {
-    console.log('Wiping existing package...');
-    console.log(bold('Initializing new package...'));
-  } else if (oldDeployData && !upgradeFrom) {
-    console.log(bold('Continuing with existing package...'));
-  } else {
-    console.log(bold('Initializing new package...'));
-  }
-  console.log('Name: ' + cyanBright(`${pkgName}`));
-  console.log('Version: ' + cyanBright(`${pkgVersion}`));
-  console.log('Preset: ' + cyanBright(`${preset}`) + (preset == 'main' ? gray(' (default)') : ''));
-  console.log('Chain ID: ' + cyanBright(`${chainId}`));
-  if (upgradeFrom) {
-    console.log(`Upgrading from: ${cyanBright(upgradeFrom)}`);
-  }
-  if (publicSourceCode) {
-    console.log(gray('Source code will be included in the package'));
-  }
-  console.log('');
-
-  const providerUrlMsg = provider.transport.type === 'http' ? provider.transport.url : providerUrl!.split(',')[0];
-  console.log(
-    bold(
-      `Building the chain (ID ${chainId})${
-        providerUrlMsg ? ' via ' + providerUrlMsg.replace(RegExp(/[=A-Za-z0-9_-]{32,}/), '*'.repeat(32)) : ''
-      }...`
-    )
-  );
-
-  let defaultSignerAddress: string;
-  if (getDefaultSigner) {
-    const defaultSigner = await getDefaultSigner!();
-    if (defaultSigner) {
-      defaultSignerAddress = defaultSigner.address;
-      console.log(`Using ${defaultSignerAddress}`);
-    } else {
-      console.log();
-      console.log(bold(red('Signer not found.')));
-      console.log(
-        red(
-          'Provide a signer to execute this build. Add the --private-key option or set the env variable CANNON_PRIVATE_KEY.'
-        )
-      );
-      process.exit(1);
-    }
-  }
-
-  if (!_.isEmpty(packageDefinition.settings)) {
-    console.log(gray('Overriding the default values for the cannonfile’s settings with the following:'));
-    for (const [key, value] of Object.entries(packageDefinition.settings)) {
-      console.log(gray(`  - ${key} = ${value}`));
-    }
-    console.log('');
-  }
-
-  if (plugins) {
-    const pluginList = await listInstalledPlugins();
-
-    if (pluginList.length) {
-      console.log('plugins:', pluginList.join(', '), 'detected');
-    }
-  }
-  console.log('');
 
   // attach control-c handler
   let ctrlcs = 0;

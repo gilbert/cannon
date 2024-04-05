@@ -134,7 +134,7 @@ describe('steps/invoke.ts', () => {
             args: ['<%= contracts.h %>', '<%= contracts.i %>'],
             overrides: { gasLimit: '<%= contracts.j %>' },
           })
-          .sort()
+          .accesses.sort()
       ).toEqual([
         'contracts.a',
         'contracts.b',
@@ -162,15 +162,15 @@ describe('steps/invoke.ts', () => {
           },
           { name: '', version: '', currentLabel: 'invoke.Hello' }
         )
-      ).toEqual(['txns.Hello', 'contracts.something', 'extras.else']);
+      ).toEqual(['txns.Hello', 'contracts.something', 'settings.else', 'extras.else']);
     });
   });
 
   describe('exec()', () => {
     // TODO: reenable once I better understand transaction event parsing in viem
     it.skip('works and parses all information from transaction result', async () => {
-      jest.mocked(await fakeRuntime.provider.simulateContract).mockResolvedValue({ request: {} } as any);
-      jest.mocked(await fakeRuntime.provider.waitForTransactionReceipt).mockResolvedValue({
+      jest.mocked(fakeRuntime.provider.simulateContract).mockResolvedValue({ request: {} } as any);
+      jest.mocked(fakeRuntime.provider.waitForTransactionReceipt).mockResolvedValue({
         transactionHash: '0x1234',
         gasUsed: BigInt(0),
         effectiveGasPrice: 0,

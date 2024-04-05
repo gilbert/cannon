@@ -24,9 +24,18 @@ import {
   publishPackage,
 } from '@usecannon/builder';
 import _ from 'lodash';
-import { useEffect, useState } from 'react';
-import { Abi, Address, createPublicClient, createWalletClient, custom, http, isAddressEqual, PublicClient } from 'viem';
-import { mainnet } from 'viem/chains';
+import { useEffect, useState, useMemo } from 'react';
+import {
+  Abi,
+  Address,
+  Chain,
+  createPublicClient,
+  createWalletClient,
+  custom,
+  http,
+  isAddressEqual,
+  PublicClient,
+} from 'viem';
 import { useChainId } from 'wagmi';
 
 export type BuildState =
@@ -67,6 +76,28 @@ export function useLoadCannonDefinition(repo: string, ref: string, filepath: str
   };
 }
 
+export function useCannonRegistry() {
+  const settings = useStore((s) => s.settings);
+
+  return useMemo(() => {
+    const onChainRegistries = settings.registryChainIds.split(',').map(
+      (chainId: string) =>
+        new OnChainRegistry({
+          address: settings.registryAddress,
+          provider: createPublicClient({
+            chain: findChain(Number.parseInt(chainId)) as Chain,
+            transport: http(),
+          }),
+        })
+    );
+
+    // Create a regsitry that loads data first from Memory to be able to utilize
+    // the locally built data
+    const fallbackRegistry = new FallbackRegistry([inMemoryRegistry, ...onChainRegistries]);
+    return fallbackRegistry;
+  }, [settings.registryAddress, settings.registryChainIds]);
+}
+
 export function useCannonBuild(safe: SafeDefinition | null, def?: ChainDefinition, prevDeploy?: DeploymentInfo) {
   const { addLog } = useLogs();
   const settings = useStore((s) => s.settings);
@@ -83,6 +114,8 @@ export function useCannonBuild(safe: SafeDefinition | null, def?: ChainDefinitio
   const [buildError, setBuildError] = useState<string | null>(null);
 
   const [buildSkippedSteps, setBuildSkippedSteps] = useState<StepExecutionError[]>([]);
+
+  const fallbackRegistry = useCannonRegistry();
 
   const buildFn = async () => {
     if (settings.isIpfsGateway || settings.ipfsApiUrl.includes('https://repo.usecannon.com')) {
@@ -122,18 +155,6 @@ export function useCannonBuild(safe: SafeDefinition | null, def?: ChainDefinitio
     });
 
     const getDefaultSigner = async () => ({ address: safe.address, wallet });
-
-    const readOnlyRegistry = new OnChainRegistry({
-      address: settings.registryAddress,
-      provider: createPublicClient({
-        chain: mainnet,
-        transport: http(),
-      }),
-    });
-
-    // Create a regsitry that loads data first from Memory to be able to utilize
-    // the locally built data
-    const fallbackRegistry = new FallbackRegistry([inMemoryRegistry, readOnlyRegistry]);
 
     const loaders = { mem: inMemoryLoader, ipfs: ipfsLoader };
 
@@ -324,20 +345,14 @@ export function useCannonPackage(packageRef: string, chainId?: number) {
 
   const settings = useStore((s) => s.settings);
 
+  const registry = useCannonRegistry();
+
   const registryQuery = useQuery({
     queryKey: ['cannon', 'registry', packageRef, packageChainId],
     queryFn: async () => {
       if (!packageRef || packageRef.length < 3) {
         return null;
       }
-
-      const registry = new OnChainRegistry({
-        address: settings.registryAddress,
-        provider: createPublicClient({
-          chain: mainnet,
-          transport: http(),
-        }),
-      });
 
       const url = await registry.getUrl(packageRef, packageChainId);
       const metaUrl = await registry.getMetaUrl(packageRef, packageChainId);

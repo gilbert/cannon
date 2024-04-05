@@ -8,11 +8,12 @@ import {
   getOutputs,
   InMemoryRegistry,
   IPFSLoader,
+  OnChainRegistry,
   PackageReference,
   publishPackage,
   traceActions,
 } from '@usecannon/builder';
-import { bold, gray, green, red, yellow } from 'chalk';
+import { blueBright, bold, gray, green, red, yellow } from 'chalk';
 import { Command } from 'commander';
 import Debug from 'debug';
 import prompts from 'prompts';
@@ -20,7 +21,7 @@ import * as viem from 'viem';
 import pkg from '../package.json';
 import { interact } from './commands/interact';
 import commandsConfig from './commandsConfig';
-import { checkCannonVersion, isPrivateKey, checkForgeAstSupport } from './helpers';
+import { checkCannonVersion, checkForgeAstSupport, ensureChainIdConsistency, isPrivateKey } from './helpers';
 import { getMainLoader } from './loader';
 import { installPlugin, listInstalledPlugins, removePlugin } from './plugins';
 import { createDefaultReadRegistry } from './registry';
@@ -31,7 +32,7 @@ import { pickAnvilOptions } from './util/anvil';
 import { doBuild } from './util/build';
 import { getContractsRecursive } from './util/contracts-recursive';
 import { parsePackageArguments, parsePackagesArguments } from './util/params';
-import { resolveRegistryProvider, resolveWriteProvider } from './util/provider';
+import { resolveRegistryProviders, resolveWriteProvider } from './util/provider';
 import { writeModuleDeployments } from './util/write-deployments';
 import './custom-steps/run';
 
@@ -142,26 +143,31 @@ function configureRun(program: Command) {
 
     options.port = Number.parseInt(options.port);
 
+    const settings = resolveCliSettings(options);
+
     let node: CannonRpcNode;
     if (options.chainId) {
-      const settings = resolveCliSettings(options);
-
       const { provider } = await resolveWriteProvider(settings, Number.parseInt(options.chainId));
 
-      if (options.providerUrl) {
-        const providerChainId = await provider.getChainId();
-        if (providerChainId != options.chainId) {
-          throw new Error(
-            `Supplied providerUrl's blockchain chainId ${providerChainId} does not match with chainId you provided ${options.chainId}`
-          );
-        }
-      }
+      // throw an error if the chainId is not consistent with the provider's chainId
+      await ensureChainIdConsistency(options.providerUrl, options.chainId);
 
       node = await runRpc(pickAnvilOptions(options), {
         forkProvider: provider,
       });
     } else {
-      node = await runRpc(pickAnvilOptions(options));
+      if (options.providerUrl) {
+        const _provider = viem.createPublicClient({ transport: viem.http(options.providerUrl) });
+        options.chainId = await _provider.getChainId();
+
+        const { provider } = await resolveWriteProvider(settings, Number.parseInt(options.chainId));
+
+        node = await runRpc(pickAnvilOptions(options), {
+          forkProvider: provider,
+        });
+      } else {
+        node = await runRpc(pickAnvilOptions(options));
+      }
     }
 
     await run(packages, {
@@ -177,6 +183,9 @@ applyCommandsConfig(program.command('build'), commandsConfig.build)
   .action(async (cannonfile, settings, opts) => {
     const cannonfilePath = path.resolve(cannonfile);
     const projectDirectory = path.dirname(cannonfilePath);
+
+    // throw an error if the chainId is not consistent with the provider's chainId
+    await ensureChainIdConsistency(opts.providerUrl, opts.chainId);
 
     console.log(bold('Building the foundry project...'));
     if (!opts.skipCompile) {
@@ -207,7 +216,7 @@ applyCommandsConfig(program.command('build'), commandsConfig.build)
     const [node, pkgSpec, , runtime] = await doBuild(cannonfile, settings, opts);
 
     if (opts.keepAlive && node) {
-      console.log(`Built package RPC URL available at http://${node.host}`);
+      console.log(`Built package RPC URL available at ${node.host}`);
       const { run } = await import('./commands/run');
       await run([{ ...pkgSpec, settings: {} }], {
         ...opts,
@@ -232,8 +241,23 @@ applyCommandsConfig(program.command('alter'), commandsConfig.alter).action(async
   flags
 ) {
   const { alter } = await import('./commands/alter');
+
+  // throw an error if the chainId is not consistent with the provider's chainId
+  await ensureChainIdConsistency(flags.providerUrl, flags.chainId);
+
   // note: for command below, pkgInfo is empty because forge currently supplies no package.json or anything similar
-  await alter(packageName, parseInt(flags.chainId), flags.preset, {}, command, options, {});
+  const newUrl = await alter(
+    packageName,
+    parseInt(flags.chainId),
+    flags.providerUrl,
+    flags.preset,
+    {},
+    command,
+    options,
+    {}
+  );
+
+  console.log(newUrl);
 });
 
 applyCommandsConfig(program.command('fetch'), commandsConfig.fetch).action(async function (packageName, ipfsHash, options) {
@@ -323,7 +347,26 @@ applyCommandsConfig(program.command('publish'), commandsConfig.publish).action(a
     cliSettings.privateKey = options.privateKey;
   }
 
-  const { provider, signers } = await resolveRegistryProvider(cliSettings);
+  const registryProviders = await resolveRegistryProviders(cliSettings);
+  let pickedRegistryProvider = registryProviders[0];
+
+  if (registryProviders.length > 1) {
+    const choices = registryProviders.map((p) => ({
+      title: `${p.provider.chain?.name ?? 'Unknown Network'} (Chain ID: ${p.provider.chain?.id})`,
+      value: p,
+    }));
+
+    pickedRegistryProvider = (
+      await prompts.prompt([
+        {
+          type: 'select',
+          name: 'pickedRegistryProvider',
+          message: 'Please choose a registry to publish to:',
+          choices,
+        },
+      ])
+    ).pickedRegistryProvider;
+  }
 
   const overrides: any = {};
 
@@ -339,6 +382,13 @@ applyCommandsConfig(program.command('publish'), commandsConfig.publish).action(a
     overrides.value = options.value;
   }
 
+  const onChainRegistry = new OnChainRegistry({
+    signer: pickedRegistryProvider.signers[0],
+    provider: pickedRegistryProvider.provider,
+    address: cliSettings.registries[0].address,
+    overrides,
+  });
+
   console.log(
     `\nSettings:\n - Max Fee Per Gas: ${
       overrides.maxFeePerGas ? overrides.maxFeePerGas.toString() : 'default'
@@ -350,16 +400,72 @@ applyCommandsConfig(program.command('publish'), commandsConfig.publish).action(a
 
   await publish({
     packageRef,
-    provider,
-    signer: signers[0],
+    onChainRegistry,
     tags: options.tags ? options.tags.split(',') : undefined,
     chainId: options.chainId ? Number.parseInt(options.chainId) : undefined,
     presetArg: options.preset ? (options.preset as string) : undefined,
     quiet: options.quiet,
     includeProvisioned: options.includeProvisioned,
     skipConfirm: options.skipConfirm,
+  });
+});
+
+applyCommandsConfig(program.command('register'), commandsConfig.register).action(async function (packageRef, options) {
+  const { register } = await import('./commands/register');
+
+  const cliSettings = resolveCliSettings(options);
+
+  if (!options.privateKey && !cliSettings.privateKey) {
+    const keyPrompt = await prompts({
+      type: 'text',
+      name: 'value',
+      message: 'Provide a private key with gas on ETH mainnet to publish this package on the registry',
+      style: 'password',
+      validate: (key) => isPrivateKey(key) || 'Private key is not valid',
+    });
+
+    if (!keyPrompt.value) {
+      console.log('A valid private key is required.');
+      process.exit(1);
+    }
+
+    options.privateKey = keyPrompt.value;
+  }
+
+  if (options.privateKey) {
+    cliSettings.privateKey = options.privateKey;
+  }
+
+  const [mainRegistryProvider] = await resolveRegistryProviders(cliSettings);
+
+  const overrides: any = {};
+
+  if (options.maxFeePerGas) {
+    overrides.maxFeePerGas = viem.parseGwei(options.maxFeePerGas);
+  }
+
+  if (options.gasLimit) {
+    overrides.gasLimit = options.gasLimit;
+  }
+
+  if (options.value) {
+    overrides.value = options.value;
+  }
+
+  const mainRegistry = new OnChainRegistry({
+    signer: mainRegistryProvider.signers[0],
+    provider: mainRegistryProvider.provider,
+    address: cliSettings.registries[0].address,
     overrides,
   });
+
+  const hash = await register({
+    packageRef,
+    mainRegistry,
+  });
+
+  console.log(blueBright('Transaction:'));
+  console.log(`  - ${hash}`);
 });
 
 applyCommandsConfig(program.command('inspect'), commandsConfig.inspect).action(async function (packageName, options) {
@@ -433,6 +539,9 @@ applyCommandsConfig(program.command('trace'), commandsConfig.trace).action(async
     throw new Error('Please provide one of the following options: --chain-id or --provider-url');
   }
 
+  // throw an error if the chainId is not consistent with the provider's chainId
+  await ensureChainIdConsistency(options.providerUrl, options.chainId);
+
   await trace({
     packageRef,
     data,
@@ -466,6 +575,9 @@ applyCommandsConfig(program.command('test'), commandsConfig.test).action(async f
     opts.dryRun = true;
   }
 
+  // throw an error if the chainId is not consistent with the provider's chainId
+  await ensureChainIdConsistency(opts.providerUrl, opts.chainId);
+
   const [node, , outputs] = await doBuild(cannonfile, [], opts);
 
   // basically we need to write deployments here
@@ -473,18 +585,18 @@ applyCommandsConfig(program.command('test'), commandsConfig.test).action(async f
 
   // after the build is done we can run the forge tests for the user
   await getProvider(node!)!.mine({ blocks: 1 });
-  const forgeCmd = spawn('forge', ['test', '--fork-url', node!.host, ...forgeOpts]);
+  const forgeProcess = spawn('forge', [opts.forgeCmd, '--fork-url', node!.host, ...forgeOpts]);
 
-  forgeCmd.stdout.on('data', (data: Buffer) => {
+  forgeProcess.stdout.on('data', (data: Buffer) => {
     process.stdout.write(data);
   });
 
-  forgeCmd.stderr.on('data', (data: Buffer) => {
+  forgeProcess.stderr.on('data', (data: Buffer) => {
     process.stderr.write(data);
   });
 
   await new Promise((resolve) => {
-    forgeCmd.on('close', (code: number) => {
+    forgeProcess.on('close', (code: number) => {
       console.log(`forge exited with code ${code}`);
       node?.kill();
       resolve({});
@@ -498,9 +610,27 @@ applyCommandsConfig(program.command('interact'), commandsConfig.interact).action
 ) {
   const cliSettings = resolveCliSettings(opts);
 
-  const p = await resolveWriteProvider(cliSettings, opts.chainId);
+  let chainId: number | undefined = opts.chainId ? Number(opts.chainId) : undefined;
 
-  const chainId = await p.provider.getChainId();
+  const isProviderUrl = cliSettings.providerUrl.startsWith('http');
+
+  // throw an error if both chainId and providerUrl are not provided
+  if (!chainId && !isProviderUrl) {
+    throw new Error('Please provide one of the following options: --chain-id or --provider-url');
+  }
+
+  // if chainId is not provided, get it from the provider
+  if (!chainId) {
+    const _provider = viem.createPublicClient({ transport: viem.http(cliSettings.providerUrl) });
+    chainId = await _provider.getChainId();
+  }
+
+  // throw an error if the chainId is not consistent with the provider's chainId
+  if (isProviderUrl) {
+    await ensureChainIdConsistency(cliSettings.providerUrl, chainId);
+  }
+
+  const { provider, signers } = await resolveWriteProvider(cliSettings, chainId);
 
   const resolver = await createDefaultReadRegistry(cliSettings);
 
@@ -523,13 +653,13 @@ applyCommandsConfig(program.command('interact'), commandsConfig.interact).action
 
   const runtime = new ChainBuilderRuntime(
     {
-      provider: p.provider,
-      chainId: chainId,
+      provider,
+      chainId,
       async getSigner(address: viem.Address) {
         // on test network any user can be conjured
         //await p.provider.impersonateAccount({ address: addr });
-        //await p.provider.setBalance({ address: addr, value: BigInt(1e22) });
-        return { address: address, wallet: p.provider };
+        //await p.provider.setBalance({ address: addr, value: viem.parseEther('10000') });
+        return { address: address, wallet: provider };
       },
       snapshots: false,
       allowPartialDeploy: false,
@@ -559,13 +689,13 @@ applyCommandsConfig(program.command('interact'), commandsConfig.interact).action
 
   const contracts = [getContractsRecursive(outputs)];
 
-  p.provider = p.provider.extend(traceActions(outputs) as any);
+  const extendedProvider = provider.extend(traceActions(outputs) as any);
 
   await interact({
     packages: [packageDefinition],
     contracts,
-    signer: p.signers[0],
-    provider: p.provider,
+    signer: signers[0],
+    provider: extendedProvider,
   });
 });
 

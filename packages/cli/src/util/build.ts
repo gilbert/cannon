@@ -179,7 +179,7 @@ async function configureSigners(
     getDefaultSigner = async () => {
       const addr = signers && signers.length > 0 ? signers[0].address : '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
       await provider.impersonateAccount({ address: addr });
-      await provider.setBalance({ address: addr, value: BigInt(1e22) });
+      await provider.setBalance({ address: addr, value: viem.parseEther('10000') });
       return { address: addr, wallet: provider };
     };
   } else {
@@ -251,7 +251,6 @@ async function prepareBuildConfig(
     wipe: opts.wipe,
     persist: !opts.dryRun,
     overrideResolver,
-    publicSourceCode: true, // TODO: foundry doesn't really have a way to specify whether the contract sources should be public or private
     providerUrl: cliSettings.providerUrl,
     writeScript: opts.writeScript,
     writeScriptFormat: opts.writeScriptFormat,

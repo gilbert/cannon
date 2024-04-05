@@ -4,7 +4,7 @@ import _ from 'lodash';
 import { ActionKinds, RawChainDefinition, validateConfig } from './actions';
 import { ChainBuilderRuntime } from './runtime';
 import { chainDefinitionSchema } from './schemas';
-import { CannonHelperContext, ChainBuilderContext, PreChainBuilderContext } from './types';
+import { CannonHelperContext, ChainBuilderContext } from './types';
 
 const debug = Debug('cannon:builder:definition');
 const debugVerbose = Debug('cannon:verbose:builder:definition');
@@ -48,6 +48,7 @@ export function validatePackageVersion(v: string) {
 
 export class ChainDefinition {
   private raw: RawChainDefinition;
+  private sensitiveDependencies: boolean;
 
   readonly allActionNames: string[];
 
@@ -63,15 +64,16 @@ export class ChainDefinition {
   readonly dependencyFor = new Map<string, string>();
   readonly resolvedDependencies = new Map<string, string[]>();
 
-  constructor(def: RawChainDefinition) {
+  constructor(def: RawChainDefinition, sensitiveDependencies = false) {
     debug('begin chain def init');
     this.raw = def;
+    this.sensitiveDependencies = sensitiveDependencies;
 
     const actions = [];
 
     // best way to get a list of actions is just to iterate over the entire def, and filter out anything
     // that are not an actions (because those are known)
-    const actionsDef = _.omit(def, 'name', 'version', 'preset', 'description', 'keywords', 'setting');
+    const actionsDef = _.omit(def, 'name', 'version', 'preset', 'description', 'keywords');
 
     // Used to validate that there are not 2 steps with the same name
     const actionNames: string[] = [];
@@ -83,7 +85,12 @@ export class ChainDefinition {
         }
 
         const fullActionName = `${action}.${name}`;
-        actionNames.push(name);
+
+        // backwards-compatibility: We dont store setting or var names as they can have duplicate names
+        if (action !== 'setting' && action !== 'var') {
+          actionNames.push(name);
+        }
+
         actions.push(fullActionName);
 
         if (ActionKinds[action] && ActionKinds[action].getOutputs) {
@@ -189,6 +196,10 @@ export class ChainDefinition {
     return _.template(this.raw.preset)(ctx) || 'main';
   }
 
+  isPublicSourceCode() {
+    return !this.raw.privateSourceCode;
+  }
+
   getConfig(n: string, ctx: ChainBuilderContext) {
     if (_.sortedIndexOf(this.allActionNames, n) === -1) {
       throw new Error(`getConfig step name not found: ${n}`);
@@ -261,22 +272,6 @@ export class ChainDefinition {
   }
 
   /**
-   * Gets the `setting` field in the raw chain definition
-   * @returns definition of settings
-   */
-  getSettings(ctx: PreChainBuilderContext) {
-    const loadedSettings: Record<string, any> = {};
-    const _ctx = { ...ctx, ...CannonHelperContext, settings: loadedSettings };
-
-    return _.mapValues(this.raw.setting, (sValue, sKey) => {
-      const newSetting = _.clone(sValue);
-      newSetting.defaultValue = _.template(sValue.defaultValue)(_ctx);
-      loadedSettings[sKey] = newSetting.defaultValue;
-      return newSetting;
-    });
-  }
-
-  /**
    * Returns a list of imported cannon packages which would be needed to successfully build this package
    * @param ctx context used for interpolation
    * @returns list of required imported cannon charts
@@ -310,8 +305,8 @@ export class ChainDefinition {
       });
 
       throw new Error(`invalid dependency: ${node}. Available "${stepName}" steps:
-        ${stepList.map((dep) => `\n - ${stepName}.${dep}`).join('')}
-      `);
+          ${stepList.map((dep) => `\n - ${stepName}.${dep}`).join('')}
+        `);
     }
 
     const deps = (_.get(this.raw, node)!.depends || []) as string[];
@@ -323,7 +318,22 @@ export class ChainDefinition {
     }
 
     if (ActionKinds[n].getInputs) {
-      for (const input of ActionKinds[n].getInputs!(_.get(this.raw, node), { name: '', version: '', currentLabel: node })) {
+      const accessComputationResults = ActionKinds[n].getInputs!(_.get(this.raw, node), {
+        name: '',
+        version: '',
+        currentLabel: node,
+      });
+
+      // Only throw this error if the user hasn't explicitly defined dependencies
+      if (this.sensitiveDependencies && accessComputationResults.unableToCompute && !_.get(this.raw, node).depends) {
+        throw new Error(
+          `Unable to compute dependencies for [${node}] because of advanced logic in template strings. Specify dependencies manually, like "depends = ['${_.uniq(
+            _.uniq(accessComputationResults.accesses).map((a) => `${this.dependencyFor.get(a)}`)
+          ).join("', '")}']"`
+        );
+      }
+
+      for (const input of accessComputationResults.accesses) {
         debug(`deps: ${node} consumes ${input}`);
         if (this.dependencyFor.has(input)) {
           deps.push(this.dependencyFor.get(input)!);
@@ -338,7 +348,7 @@ export class ChainDefinition {
   }
 
   getDependencies(node: string) {
-    return this.resolvedDependencies.get(node)!;
+    return this.resolvedDependencies.get(node) || [];
   }
 
   /**
@@ -493,6 +503,11 @@ export class ChainDefinition {
   getLayerDependencyTree(n: string, layers: StateLayers): string[] {
     const deps = [];
 
+    if (!layers[n]) {
+      debug('WARN: layer dependency tree not computable for step because not found:', n);
+      return [];
+    }
+
     for (const dep of layers[n].depends) {
       deps.push(...this.getLayerDependencyTree(dep, layers));
     }
@@ -543,6 +558,10 @@ export class ChainDefinition {
       // first. filter any deps which are extraneous. This is a dependency which is a subdepenendency of an assigned layer for a dependency.
       // @note this is the slowest part of cannon atm. Improvements here would be most important.
       for (const dep of deps) {
+        if (!layers[dep]) {
+          debug('WARN: unknown dependency recorded in cannonfile:', dep);
+          continue;
+        }
         for (const depdep of layers[dep].depends) {
           const depTree = this.getLayerDependencyTree(depdep, layers);
           deps = deps.filter((d) => depTree.indexOf(d) === -1);
@@ -607,6 +626,10 @@ export class ChainDefinition {
   }
 
   private getPrintLinesUsed(n: string, layers = this.getStateLayers()): number {
+    if (!layers[n]) {
+      debug('WARN: cannot calculate print lines used for layer becuase undefined:', n);
+      return 0;
+    }
     return Math.max(
       layers[n].actions.length + 2,
       _.sumBy(layers[n].depends, (d) => this.getPrintLinesUsed(d, layers))

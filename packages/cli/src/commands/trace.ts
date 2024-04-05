@@ -43,19 +43,12 @@ export async function trace({
   // will call `trace_transaction`, and decode as much data from the trace
   // as possible, the same way that an error occurs
 
-  if (providerUrl) {
-    // get chain id from provider
-    const publicClient = viem.createPublicClient({
-      transport: viem.http(providerUrl),
-    });
+  // get transaction data from the provider
+  const { provider } = await resolveWriteProvider(cliSettings, chainId);
 
-    if (chainId && chainId !== (await publicClient.getChainId())) {
-      throw new Error(
-        "The provided chain ID does not match the provider's chain ID, please ensure both chain ID's match or specify only one option: --chain-id or --provider-url."
-      );
-    }
-
-    chainId = await publicClient.getChainId();
+  // if chain id is not specified, get it from the provider
+  if (!chainId) {
+    chainId = await provider.getChainId();
   }
 
   const deployInfos = await readDeployRecursive(packageRef, chainId);
@@ -65,9 +58,6 @@ export async function trace({
   for (const di of deployInfos) {
     _.merge(artifacts, getArtifacts(new ChainDefinition(di.def), di.state));
   }
-
-  // get transaction data from the provider
-  const { provider } = await resolveWriteProvider(cliSettings, chainId);
 
   if (viem.isHash(data)) {
     const txHash = data as viem.Hash;
@@ -123,11 +113,12 @@ export async function trace({
         port: 0,
         forkBlockNumber: !block || block === 'latest' ? undefined : (blockInfo.number! - BigInt(1)).toString(),
         timestamp,
+        chainId,
       },
       { forkProvider: provider as any }
     );
   } else {
-    rpc = await runRpc({ port: 0 }, { forkProvider: provider as any });
+    rpc = await runRpc({ port: 0, chainId }, { forkProvider: provider as any });
   }
   const simulateProvider = getProvider(rpc)!;
 
@@ -177,10 +168,18 @@ export async function trace({
     console.log();
     if (receipt.status == 'success') {
       console.log(
-        green(bold(`Transaction completes successfully with return value: ${traces[0].result.output} (${totalGasUsed} gas)`))
+        green(
+          bold(
+            `Transaction completes successfully with return value: ${
+              traces[0].result?.output ?? 'unknown'
+            } (${totalGasUsed} gas)`
+          )
+        )
       );
     } else {
-      console.log(red(bold(`Transaction completes with error: ${traces[0].result.output} (${totalGasUsed} gas)`)));
+      console.log(
+        red(bold(`Transaction completes with error: ${traces[0].result?.output ?? 'unknown'} (${totalGasUsed} gas)`))
+      );
     }
   } else {
     console.log(JSON.stringify(traces, null, 2));
@@ -194,5 +193,5 @@ function computeGasUsed(traces: TraceEntry[], txn: viem.TransactionRequest): num
   const txnData = viem.hexToBytes(txn.data || '0x');
   const zeroDataCount = txnData.filter((d) => d === 0).length;
   const nonZeroDataCount = txnData.length - zeroDataCount;
-  return parseInt(traces[0].result.gasUsed) + 21000 + 4 * zeroDataCount + 16 * nonZeroDataCount;
+  return parseInt(traces[0].result?.gasUsed ?? '0') + 21000 + 4 * zeroDataCount + 16 * nonZeroDataCount;
 }

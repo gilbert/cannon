@@ -4,6 +4,9 @@ import * as viem from 'viem';
 
 import { bold, yellow } from 'chalk';
 
+import { ActionKinds } from '@usecannon/builder/dist/actions';
+import { PackageReference } from '@usecannon/builder/dist/package';
+
 import { createDefaultReadRegistry } from '../registry';
 import {
   createInitialContext,
@@ -12,11 +15,10 @@ import {
   getOutputs,
   CANNON_CHAIN_ID,
   DeploymentInfo,
+  StepState,
 } from '@usecannon/builder';
-import { ActionKinds } from '@usecannon/builder/dist/actions';
-import { resolveCliSettings } from '../settings';
 import { getMainLoader } from '../loader';
-import { PackageReference } from '@usecannon/builder/dist/package';
+import { resolveCliSettings } from '../settings';
 import { resolveWriteProvider } from '../util/provider';
 
 const debug = Debug('cannon:cli:alter');
@@ -24,9 +26,10 @@ const debug = Debug('cannon:cli:alter');
 export async function alter(
   packageRef: string,
   chainId: number,
+  providerUrl: string,
   presetArg: string,
   meta: any,
-  command: 'set-url' | 'set-contract-address' | 'import' | 'mark-complete' | 'mark-incomplete',
+  command: 'set-url' | 'set-contract-address' | 'import' | 'mark-complete' | 'mark-incomplete' | 'migrate-212',
   targets: string[],
   runtimeOverrides: Partial<ChainBuilderRuntime>
 ) {
@@ -45,19 +48,17 @@ export async function alter(
     );
   }
 
-  const cliSettings = resolveCliSettings();
-
-  // create temporary provider
-  // todo: really shouldn't be necessary
-  // const node = await runRpc({
-  //   port: 30000 + Math.floor(Math.random() * 30000),
-  // });
-  // const provider = getProvider(node);
+  const cliSettings = resolveCliSettings({ providerUrl });
 
   const { provider } = await resolveWriteProvider(cliSettings, chainId);
-
   const resolver = await createDefaultReadRegistry(cliSettings);
   const loader = getMainLoader(cliSettings);
+
+  // if chain id is not specified, get it from the provider
+  if (!chainId) {
+    chainId = await provider.getChainId();
+  }
+
   const runtime = new ChainBuilderRuntime(
     {
       provider,
@@ -65,7 +66,7 @@ export async function alter(
       async getSigner(addr: viem.Address) {
         // on test network any user can be conjured
         //await provider.impersonateAccount({ address: addr });
-        //await provider.setBalance({ address: addr, value: BigInt(1e22) });
+        //await provider.setBalance({ address: addr, value: viem.parseEther('10000') });
         return { address: addr, wallet: provider as viem.WalletClient };
       },
       snapshots: false,
@@ -166,13 +167,48 @@ export async function alter(
 
         // some steps may require access to misc artifacts
         await runtime.restoreMisc(deployInfo.miscUrl);
-        deployInfo.state[stepName].artifacts = await stepAction.importExisting(
+
+        const importExisting = await stepAction.importExisting(
           runtime,
           ctx,
           config,
           { currentLabel: stepName, name: def.getName(ctx), version: def.getVersion(ctx) },
           existingKeys
         );
+
+        if (deployInfo.state[stepName]) {
+          deployInfo.state[stepName].artifacts = importExisting;
+        } else {
+          debug(`step ${stepName} not found, populating...`);
+          try {
+            deployInfo.state[stepName] = {} as StepState;
+
+            const ctx = await createInitialContext(new ChainDefinition(deployInfo.def), meta, chainId, deployInfo.options);
+            const outputs = await getOutputs(runtime, new ChainDefinition(deployInfo.def), deployInfo.state);
+
+            _.assign(ctx, outputs);
+
+            deployInfo.state[stepName].artifacts = await stepAction.importExisting(
+              runtime,
+              ctx,
+              config,
+              { currentLabel: stepName, name: def.getName(ctx), version: def.getVersion(ctx) },
+              existingKeys
+            );
+
+            // Recompute hash for this step in case there is a mismatch
+            const h = await new ChainDefinition(deployInfo.def).getState(stepName, runtime, ctx, false);
+            deployInfo.state[stepName].hash = h ? h[0] : null;
+          } catch (err) {
+            throw new Error(
+              `Step ${stepName} not found in deployment state and could not be populated by cannon, here are the available step options: \n ${Object.keys(
+                deployInfo.state
+              )
+                .map((s) => `\n ${s}`)
+                .join('\n')}`
+            );
+          }
+        }
       }
 
       break;
@@ -201,6 +237,38 @@ export async function alter(
       // invalidate the state hash
       deployInfo.state[targets[0]].hash = 'INCOMPLETE';
       break;
+    case 'migrate-212':
+      // nested provisions also have to be updated
+      for (const k in deployInfo.state) {
+        if (k.startsWith('provision.')) {
+          const oldUrl = deployInfo.state[k].artifacts.imports![k.split('.')[1]].url;
+
+          const newUrl = await alter(
+            `@${oldUrl.split(':')[0]}:${_.last(oldUrl.split('/'))}`,
+            chainId,
+            providerUrl,
+            presetArg,
+            meta,
+            'migrate-212',
+            targets,
+            runtimeOverrides
+          );
+
+          deployInfo.state[k].artifacts.imports![k.split('.')[1]].url = newUrl;
+        }
+      }
+
+      // `contract` steps renamed to `deploy`
+      // `import` steps renamed to `pull`
+      // `provision` steps renamed to `clone`
+      // we just need to update the key that the state for these releases is stored on
+      deployInfo.state = _.mapKeys(deployInfo.state, (_v, k) => {
+        return k
+          .replace(/^contract\./, 'deploy.')
+          .replace(/^import\./, 'pull.')
+          .replace(/^provision\./, 'clone.');
+      });
+      break;
   }
 
   const newUrl = await runtime.putDeploy(deployInfo);
@@ -209,7 +277,7 @@ export async function alter(
     throw new Error('loader is not writable');
   }
 
-  console.log(newUrl);
-
   await resolver.publish([fullPackageRef], chainId, newUrl, metaUrl || '');
+
+  return newUrl;
 }

@@ -2,10 +2,9 @@ import Debug from 'debug';
 import _ from 'lodash';
 import * as viem from 'viem';
 import { z } from 'zod';
-import { computeTemplateAccesses } from '../access-recorder';
-import { ensureArachnidCreate2Exists, makeArachnidCreate2Txn } from '../create2';
-import { encodeDeployData } from '../helpers';
-import { contractSchema } from '../schemas';
+import { computeTemplateAccesses, mergeTemplateAccesses } from '../access-recorder';
+import { deploySchema } from '../schemas';
+import { ensureArachnidCreate2Exists, makeArachnidCreate2Txn, ARACHNID_DEFAULT_DEPLOY_ADDR } from '../create2';
 import {
   ChainArtifacts,
   ChainBuilderContext,
@@ -14,7 +13,7 @@ import {
   ContractArtifact,
   PackageState,
 } from '../types';
-import { getContractDefinitionFromPath, getMergedAbiFromContractPaths } from '../util';
+import { encodeDeployData, getContractDefinitionFromPath, getMergedAbiFromContractPaths } from '../util';
 
 const debug = Debug('cannon:builder:contract');
 
@@ -23,7 +22,7 @@ const debug = Debug('cannon:builder:contract');
  *  @public
  *  @group Contract
  */
-export type Config = z.infer<typeof contractSchema>;
+export type Config = z.infer<typeof deploySchema>;
 
 export interface ContractOutputs {
   abi: string;
@@ -81,7 +80,14 @@ function generateOutputs(
     }),
   };
 
-  const [, create2Addr] = makeArachnidCreate2Txn(config.salt || '', txn.data!);
+  const [, create2Addr] = makeArachnidCreate2Txn(
+    config.salt || '',
+    txn.data!,
+    viem.getCreateAddress({
+      from: typeof config.create2 === 'string' ? (config.create2 as viem.Address) : ARACHNID_DEFAULT_DEPLOY_ADDR,
+      nonce: BigInt(0),
+    })
+  );
 
   let abi = artifactData.abi;
   // override abi?
@@ -125,10 +131,10 @@ function generateOutputs(
 // ensure the specified contract is already deployed
 // if not deployed, deploy the specified hardhat contract with specfied options, export address, abi, etc.
 // if already deployed, reexport deployment options for usage downstream and exit with no changes
-const contractSpec = {
-  label: 'contract',
+const deploySpec = {
+  label: 'deploy',
 
-  validate: contractSchema,
+  validate: _.cloneDeep(deploySchema),
 
   async getState(runtime: ChainBuilderRuntimeInfo, ctx: ChainBuilderContextWithHelpers, config: Config) {
     const parsedConfig = this.configInject(ctx, config);
@@ -185,29 +191,30 @@ const contractSpec = {
   },
 
   getInputs(config: Config) {
-    const accesses: string[] = [];
-
-    accesses.push(...computeTemplateAccesses(config.from));
-    accesses.push(...computeTemplateAccesses(config.nonce));
-    accesses.push(...computeTemplateAccesses(config.artifact));
-    accesses.push(...computeTemplateAccesses(config.value));
-    accesses.push(...computeTemplateAccesses(config.abi));
-    accesses.push(...computeTemplateAccesses(config.salt));
+    let accesses = computeTemplateAccesses(config.from);
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.nonce));
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.artifact));
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.value));
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.abi));
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.salt));
 
     if (config.abiOf) {
-      config.abiOf.forEach((v) => accesses.push(...computeTemplateAccesses(v)));
+      _.forEach(config.abiOf, (v) => (accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(v))));
     }
 
     if (config.args) {
-      _.forEach(config.args, (a) => accesses.push(...computeTemplateAccesses(JSON.stringify(a))));
+      _.forEach(
+        config.args,
+        (v) => (accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(JSON.stringify(v))))
+      );
     }
 
     if (config.libraries) {
-      _.forEach(config.libraries, (a) => accesses.push(...computeTemplateAccesses(a)));
+      _.forEach(config.libraries, (v) => (accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(v))));
     }
 
     if (config?.overrides?.gasLimit) {
-      accesses.push(...computeTemplateAccesses(config.overrides.gasLimit));
+      accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.overrides.gasLimit));
     }
 
     return accesses;
@@ -272,11 +279,14 @@ const contractSpec = {
     let receipt: viem.TransactionReceipt | null = null;
 
     if (config.create2) {
-      await ensureArachnidCreate2Exists(runtime);
+      const arachnidDeployerAddress = await ensureArachnidCreate2Exists(
+        runtime,
+        typeof config.create2 === 'string' ? (config.create2 as viem.Address) : ARACHNID_DEFAULT_DEPLOY_ADDR
+      );
 
       debug('performing arachnid create2');
-      const [create2Txn, addr] = makeArachnidCreate2Txn(config.salt || '', txn.data!);
-      debug('create2 address is', addr);
+      const [create2Txn, addr] = makeArachnidCreate2Txn(config.salt || '', txn.data!, arachnidDeployerAddress);
+      debug(`create2: deploy ${addr} by ${arachnidDeployerAddress}`);
 
       const bytecode = await runtime.provider.getBytecode({ address: addr });
 
@@ -288,10 +298,11 @@ const contractSpec = {
           ? await runtime.getSigner(config.from as viem.Address)
           : await runtime.getDefaultSigner!(txn, config.salt);
 
-        const hash = await signer.wallet.sendTransaction(
-          _.assign(create2Txn, overrides, { account: signer.wallet.account || signer.address })
-        );
+        const fullCreate2Txn = _.assign(create2Txn, overrides, { account: signer.wallet.account || signer.address });
+        debug('final create2 txn', fullCreate2Txn);
 
+        const preparedTxn = await runtime.provider.prepareTransactionRequest(fullCreate2Txn);
+        const hash = await signer.wallet.sendTransaction(preparedTxn as any);
         receipt = await runtime.provider.waitForTransactionReceipt({ hash });
         debug('arachnid create2 complete', receipt);
       }
@@ -320,9 +331,10 @@ const contractSpec = {
         const signer = config.from
           ? await runtime.getSigner(config.from as viem.Address)
           : await runtime.getDefaultSigner!(txn, config.salt);
-        const hash = await signer.wallet.sendTransaction(
+        const preparedTxn = await runtime.provider.prepareTransactionRequest(
           _.assign(txn, overrides, { account: signer.wallet.account || signer.address })
         );
+        const hash = await signer.wallet.sendTransaction(preparedTxn as any);
         receipt = await runtime.provider.waitForTransactionReceipt({ hash });
       }
     }
@@ -351,4 +363,4 @@ const contractSpec = {
   },
 };
 
-export default contractSpec;
+export default deploySpec;

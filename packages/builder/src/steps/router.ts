@@ -2,8 +2,8 @@ import Debug from 'debug';
 import _ from 'lodash';
 import * as viem from 'viem';
 import { z } from 'zod';
-import { computeTemplateAccesses } from '../access-recorder';
-import { encodeDeployData } from '../helpers';
+import { computeTemplateAccesses, mergeTemplateAccesses } from '../access-recorder';
+import { encodeDeployData } from '../util';
 import { ChainBuilderRuntime } from '../runtime';
 import { routerSchema } from '../schemas';
 import { ChainArtifacts, ChainBuilderContext, ChainBuilderContextWithHelpers, ContractMap, PackageState } from '../types';
@@ -69,12 +69,13 @@ const routerStep = {
   },
 
   getInputs(config: Config) {
-    const accesses: string[] = [];
+    let accesses = computeTemplateAccesses(config.from);
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.salt));
+    accesses.accesses.push(
+      ...config.contracts.map((c) => (c.includes('.') ? `imports.${c.split('.')[0]}` : `contracts.${c}`))
+    );
 
-    accesses.push(...computeTemplateAccesses(config.from));
-    accesses.push(...computeTemplateAccesses(config.salt));
-
-    return config.contracts.map((c) => (c.includes('.') ? `imports.${c.split('.')[0]}` : `contracts.${c}`));
+    return accesses;
   },
 
   getOutputs(_: Config, packageState: PackageState) {
@@ -145,14 +146,15 @@ const routerStep = {
 
     debug('using deploy signer with address', signer.address);
 
-    const hash = await signer.wallet.sendTransaction({
-      account: signer.wallet.account || signer.address,
+    const preparedTxn = await signer.wallet.prepareTransactionRequest({
+      account: signer.wallet.account || signer.address!,
       data: encodeDeployData({
         abi: solidityInfo.abi,
         bytecode: solidityInfo.bytecode as viem.Hash,
       }),
       chain: undefined,
     });
+    const hash = await signer.wallet.sendTransaction(preparedTxn as any);
 
     const receipt = await runtime.provider.waitForTransactionReceipt({ hash });
 

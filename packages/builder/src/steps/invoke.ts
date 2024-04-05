@@ -3,7 +3,7 @@ import * as viem from 'viem';
 import { AbiFunction } from 'viem';
 import _ from 'lodash';
 import { z } from 'zod';
-import { computeTemplateAccesses } from '../access-recorder';
+import { computeTemplateAccesses, mergeTemplateAccesses } from '../access-recorder';
 import { invokeSchema } from '../schemas';
 import {
   CannonSigner,
@@ -139,26 +139,23 @@ async function runTxn(
 
     const callSigner = await runtime.getSigner(address);
 
-    const txnSimulation = await runtime.provider.simulateContract({
-      address: contract.address,
-      abi: [neededFuncAbi],
-      functionName: neededFuncAbi.name,
+    const preparedTxn = await runtime.provider.prepareTransactionRequest({
       account: callSigner.wallet.account || callSigner.address,
-      args: config.args,
+      to: contract.address,
+      data: viem.encodeFunctionData({ abi: [neededFuncAbi], functionName: neededFuncAbi.name, args: config.args }),
+      value: config.value,
       ...overrides,
     });
-    // TODO: why does viem hate having `txnSimulation.request` below without the any, despiset hte example on how to do this on the guide? https://viem.sh/docs/contract/writeContract#writecontract
-    txn = await callSigner.wallet.writeContract(txnSimulation.request as any);
+    txn = await callSigner.wallet.sendTransaction(preparedTxn as any);
   } else {
-    const txnSimulation = await runtime.provider.simulateContract({
-      address: contract.address,
-      abi: [neededFuncAbi],
+    const preparedTxn = await runtime.provider.prepareTransactionRequest({
       account: signer.wallet.account || signer.address,
-      functionName: neededFuncAbi.name,
-      args: config.args,
+      to: contract.address,
+      data: viem.encodeFunctionData({ abi: [neededFuncAbi], functionName: neededFuncAbi.name, args: config.args }),
+      value: config.value,
       ...overrides,
     });
-    txn = await signer.wallet.writeContract(txnSimulation.request as any);
+    txn = await signer.wallet.sendTransaction(preparedTxn as any);
   }
 
   const receipt = await runtime.provider.waitForTransactionReceipt({ hash: txn });
@@ -179,14 +176,14 @@ async function runTxn(
   return [receipt, txnEvents];
 }
 
-function parseEventOutputs(config: Config['extra'], txnEvents: EncodedTxnEvents[]): { [label: string]: string } {
+function parseEventOutputs(config: Config['var'], txnEvents: EncodedTxnEvents[]): { [label: string]: string } {
   const vals: { [label: string]: string } = {};
   let expectedEvent = '';
 
   if (config) {
     for (const n in txnEvents) {
-      for (const [name, extra] of Object.entries(config)) {
-        const events = _.entries(txnEvents[n][extra.event]);
+      for (const [name, varData] of Object.entries(config)) {
+        const events = _.entries(txnEvents[n][varData.event]);
 
         // Check for an event defined in the cannonfile
         if (
@@ -215,7 +212,7 @@ function parseEventOutputs(config: Config['extra'], txnEvents: EncodedTxnEvents[
             label += '_' + i;
           }
 
-          const v = e.args[extra.arg];
+          const v = e.args[varData.arg];
 
           vals[label] = typeof v == 'bigint' ? v.toString() : v;
         }
@@ -284,12 +281,12 @@ async function importTxnData(
     }
   }
 
-  const extras: ChainArtifacts['extras'] = parseEventOutputs(config.extra, _.map(txns, 'events'));
+  const settings: ChainArtifacts['settings'] = parseEventOutputs(config.var || config.extra, _.map(txns, 'events'));
 
   return {
     contracts,
     txns,
-    extras,
+    settings,
   };
 }
 
@@ -315,7 +312,15 @@ const invokeSpec = {
         args: cfg.args?.map((v) => JSON.stringify(v)),
         value: cfg.value || '0',
         factory: cfg.factory,
-        extra: cfg.extra,
+        var: cfg.var || cfg.extra,
+      },
+      {
+        to: cfg.target?.map((t) => getContractFromPath(ctx, t)?.address),
+        func: cfg.func,
+        args: cfg.args?.map((v) => JSON.stringify(v)),
+        value: cfg.value || '0',
+        factory: cfg.factory,
+        extra: cfg.var || cfg.extra,
       },
       {
         to: cfg.target?.map((t) => getContractFromPath(ctx, t)?.address),
@@ -385,8 +390,10 @@ const invokeSpec = {
       }
     }
 
-    for (const name in config.extra) {
-      const f = config.extra[name];
+    const varsConfig = config.var || config.extra;
+
+    for (const name in varsConfig) {
+      const f = varsConfig[name];
       f.event = _.template(f.event)(ctx);
     }
 
@@ -394,47 +401,54 @@ const invokeSpec = {
   },
 
   getInputs(config: Config) {
-    const accesses: string[] = [];
+    let accesses = computeTemplateAccesses(config.abi);
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.func));
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.from));
+    accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.value));
 
     for (const target of config.target) {
       if (!viem.isAddress(target)) {
         if (target.includes('.')) {
-          accesses.push(`imports.${target.split('.')[0]}`);
+          accesses.accesses.push(`imports.${target.split('.')[0]}`);
         } else {
-          accesses.push(`contracts.${target}`);
+          accesses.accesses.push(`contracts.${target}`);
         }
       }
     }
 
-    accesses.push(...computeTemplateAccesses(config.abi));
-    accesses.push(...computeTemplateAccesses(config.func));
-    accesses.push(...computeTemplateAccesses(config.from));
-    accesses.push(...computeTemplateAccesses(config.value));
-
     if (config.args) {
-      _.forEach(config.args, (a) => accesses.push(...computeTemplateAccesses(JSON.stringify(a))));
+      _.forEach(
+        config.args,
+        (a) => (accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(JSON.stringify(a))))
+      );
     }
 
     if (config.fromCall) {
-      accesses.push(...computeTemplateAccesses(config.fromCall.func));
-      _.forEach(config.fromCall.args, (a) => accesses.push(...computeTemplateAccesses(JSON.stringify(a))));
+      accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.fromCall.func));
+
+      _.forEach(
+        config.fromCall.args,
+        (a) => (accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(JSON.stringify(a))))
+      );
     }
 
     if (config?.overrides) {
-      accesses.push(...computeTemplateAccesses(config.overrides.gasLimit));
+      accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(config.overrides.gasLimit));
     }
 
     for (const name in config.factory) {
       const f = config.factory[name];
 
-      accesses.push(...computeTemplateAccesses(f.event));
-      accesses.push(...computeTemplateAccesses(f.artifact));
-      _.forEach(f.abiOf, (a) => accesses.push(...computeTemplateAccesses(a)));
+      accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(f.event));
+      accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(f.artifact));
+
+      _.forEach(f.abiOf, (a) => (accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(a))));
     }
 
-    for (const name in config.extra) {
-      const f = config.extra[name];
-      accesses.push(...computeTemplateAccesses(f.event));
+    const varsConfig = config.var || config.extra;
+    for (const name in varsConfig) {
+      const f = varsConfig[name];
+      accesses = mergeTemplateAccesses(accesses, computeTemplateAccesses(f.event));
     }
 
     return accesses;
@@ -443,7 +457,7 @@ const invokeSpec = {
   getOutputs(config: Config, packageState: PackageState) {
     const outputs = [`txns.${packageState.currentLabel.split('.')[1]}`];
 
-    // factories can output contracts, and extras can output extras
+    // factories can output contracts, and var can output vars
     if (config.factory) {
       for (const k in config.factory) {
         if ((config.factory[k].expectCount || 1) > 1) {
@@ -456,13 +470,18 @@ const invokeSpec = {
       }
     }
 
-    if (config.extra) {
-      for (const k in config.extra) {
-        if ((config.extra[k].expectCount || 1) > 1) {
-          for (let i = 0; i < config.extra[k].expectCount!; i++) {
+    const varsConfig = config.var || config.extra;
+    if (varsConfig) {
+      for (const k in varsConfig) {
+        if ((varsConfig[k].expectCount || 1) > 1) {
+          for (let i = 0; i < varsConfig[k].expectCount!; i++) {
+            outputs.push(`settings.${k}_${i}`);
+            // backwards compatibility
             outputs.push(`extras.${k}_${i}`);
           }
         } else {
+          outputs.push(`settings.${k}`);
+          //backwards compatibility
           outputs.push(`extras.${k}`);
         }
       }

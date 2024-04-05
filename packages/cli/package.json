@@ -1,6 +1,6 @@
 {
   "name": "@usecannon/cli",
-  "version": "2.11.17",
+  "version": "2.12.0",
   "description": "Utility for instantly loading cannon packages in standalone contexts",
   "main": "dist/src/index.js",
   "scripts": {
@@ -41,7 +41,7 @@
     "@types/prompts": "^2.0.14",
     "@types/semver": "^7.3.12",
     "@types/sinon": "^10.0.15",
-    "axios": "^1.6.2",
+    "axios": "^1.6.7",
     "jest": "^29.5.0",
     "mock-fs": "^5.2.0",
     "tmp-promise": "^3.0.3",
@@ -58,8 +58,8 @@
   "dependencies": {
     "@iarna/toml": "^3.0.0",
     "@synthetixio/wei": "^2.74.1",
+    "@usecannon/builder": "2.12.0",
     "abitype": "^1.0.0",
-    "@usecannon/builder": "2.11.17",
     "chalk": "^4.1.2",
     "commander": "^9.5.0",
     "debug": "^4.3.4",
@@ -73,9 +73,9 @@
     "table": "^6.8.0",
     "tildify": "2.0.0",
     "untildify": "^4.0.0",
-    "viem": "^2.6.1",
+    "viem": "^2.9.3",
     "znv": "^0.4.0",
     "zod": "^3.22.4"
   },
-  "gitHead": "cc1863744d5b4b0a531ee236437df64f3b3e5fdf"
+  "gitHead": "a20d4d65cbeb3e9ebf23da3ba411d33c1a6a20f5"
 }
