@@ -160,7 +160,7 @@ function TransactionDetailsPage({
 
   let prevDeployGitHash: string;
   if (queuedWithGitOps) {
-    prevDeployGitHash = hintData?.prevGitRepoHash; 
+    prevDeployGitHash = hintData?.prevGitRepoHash;
   } else {
     prevDeployGitHash =
       prevDeployHashQuery.data &&
@@ -235,8 +235,6 @@ function TransactionDetailsPage({
   const chainName = safeChain?.name;
 
   const gitDiffContainerRef = useRef<HTMLDivElement>(null);
-
-  console.log(prevDeployGitHash)
 
   return (
     <>
