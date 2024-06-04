@@ -160,8 +160,7 @@ function TransactionDetailsPage({
 
   let prevDeployGitHash: string;
   if (queuedWithGitOps) {
-    prevDeployGitHash =
-      (hintData?.prevGitRepoHash || hintData?.gitRepoHash) ?? '';
+    prevDeployGitHash = hintData?.prevGitRepoHash; 
   } else {
     prevDeployGitHash =
       prevDeployHashQuery.data &&
@@ -237,6 +236,8 @@ function TransactionDetailsPage({
 
   const gitDiffContainerRef = useRef<HTMLDivElement>(null);
 
+  console.log(prevDeployGitHash)
+
   return (
     <>
       {!hintData && (
@@ -280,7 +281,7 @@ function TransactionDetailsPage({
           </Box>
 
           <Container maxW="container.lg" mt={[6, 6, 12]}>
-            {queuedWithGitOps && (
+            {queuedWithGitOps && prevDeployGitHash && (
               <Box
                 background="gray.800"
                 p={4}
