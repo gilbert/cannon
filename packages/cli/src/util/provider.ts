@@ -24,15 +24,19 @@ export const isURL = (url: string): boolean => {
   }
 };
 
-export const supportsTraceTransaction = async (provider: viem.PublicClient & viem.WalletClient) => {
+export const supportsTraceTransaction = async (
+  provider: viem.PublicClient & viem.WalletClient & viem.TestClient
+): Promise<boolean> => {
   // There is no a standard way to check if a provider supports trace_transaction.
   // Ref: https://ethereum-magicians.org/t/eip-7663-new-eth-checkmethodsupport-for-json-rpc/19247
   try {
+    // get the latest block including transactions
     const blockNumber = await provider.getBlock({
       blockTag: 'latest',
       includeTransactions: true,
     });
 
+    // attempt to call trace_transaction on a transaction in the latest block
     await provider.request({
       // @ts-ignore: method not defined in viem types
       method: 'trace_transaction',
@@ -43,12 +47,11 @@ export const supportsTraceTransaction = async (provider: viem.PublicClient & vie
   } catch (error: any) {
     // if an error is thrown, check if it's because the method is unsupported
     const message = error.message.toLowerCase();
-    const errorMessages = ['unsupported', 'disabled', 'unavailable', 'not available', 'not exist', 'not found'];
-    if (errorMessages.some((error) => message.includes(error))) {
-      return false;
-    }
 
-    return true;
+    const unsupportedMessages = ['unsupported', 'disabled', 'unavailable', 'not available', 'not exist', 'not found'];
+    const isUnsupported = unsupportedMessages.some((unsupportedMessage) => message.includes(unsupportedMessage));
+
+    return !isUnsupported;
   }
 };
 
