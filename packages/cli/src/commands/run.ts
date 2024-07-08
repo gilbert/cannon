@@ -28,6 +28,7 @@ import { getContractsRecursive } from '../util/contracts-recursive';
 
 import { build } from './build';
 import { interact } from './interact';
+import { supportsTraceTransaction } from '../util/provider';
 
 export interface RunOptions {
   node: CannonRpcNode;
@@ -189,10 +190,27 @@ export async function run(packages: PackageSpecification[], options: RunOptions)
 
   let traceLevel = 0;
 
+  const isTraceSupported = await supportsTraceTransaction(provider);
+
   async function debugTracing(blockInfo: viem.Block) {
     if (traceLevel == 0) {
       return;
     }
+
+    if (!isTraceSupported) {
+      console.log('');
+      console.log(
+        yellow(
+          `The RPC node doesn't support transaction tracing. Please switch to an RPC node that supports the ${bold(
+            'trace_transaction'
+          )} method.`
+        )
+      );
+      console.log('');
+
+      return;
+    }
+
     const bwt = await provider.getBlock({ blockNumber: blockInfo.number!, includeTransactions: true });
 
     for (const txn of bwt.transactions) {
@@ -224,8 +242,7 @@ export async function run(packages: PackageSpecification[], options: RunOptions)
     }
   }
 
-  // TODO: once again types from docs do not work here for some reason
-  provider.watchBlocks({ onBlock: debugTracing as any });
+  provider.watchBlocks({ onBlock: debugTracing });
 
   if (options.nonInteractive) {
     await new Promise(() => {

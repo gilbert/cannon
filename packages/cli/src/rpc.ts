@@ -196,7 +196,6 @@ export function createProviderProxy(provider: viem.Client): Promise<string> {
           })
         );
       } catch (err) {
-        console.log('got rpc error', err);
         res.writeHead(400);
         res.end(
           JSON.stringify({
