@@ -639,11 +639,18 @@ applyCommandsConfig(program.command('trace'), commandsConfig.trace).action(async
   });
 });
 
-applyCommandsConfig(program.command('decode'), commandsConfig.decode).action(async function (packageRef, data, options) {
+applyCommandsConfig(program.command('decode'), commandsConfig.decode).action(async function (
+  packageRefOrTransactionHash,
+  data,
+  options
+) {
   const { decode } = await import('./commands/decode');
 
+  const isTxHash = viem.isHash(packageRefOrTransactionHash);
+
   await decode({
-    packageRef,
+    packageRef: isTxHash ? null : packageRefOrTransactionHash,
+    txHash: isTxHash ? packageRefOrTransactionHash : null,
     data,
     chainId: parseInt(options.chainId || CANNON_CHAIN_ID),
     presetArg: options.preset,

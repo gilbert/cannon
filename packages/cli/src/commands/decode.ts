@@ -1,21 +1,25 @@
 import * as viem from 'viem';
+import { whatsabi } from '@shazow/whatsabi';
 import { AbiFunction, AbiEvent } from 'abitype';
 import { bold, gray, green, italic, yellow } from 'chalk';
 import { ContractData, DeploymentInfo, decodeTxError } from '@usecannon/builder';
 
 import { resolveCliSettings } from '../../src/settings';
 
+import { chains } from '../chains';
 import { readDeployRecursive } from '../package';
 import { formatAbiFunction, getSighash } from '../helpers';
 
 export async function decode({
   packageRef,
+  txHash,
   data,
   chainId,
   presetArg,
   json = false,
 }: {
-  packageRef: string;
+  packageRef: string | null;
+  txHash: viem.Hash | null;
   data: viem.Hash[];
   chainId: number;
   presetArg: string;
@@ -34,16 +38,49 @@ export async function decode({
         )
       )
     );
-    packageRef = packageRef.split('@')[0] + `@${presetArg}`;
+    packageRef = packageRef ? packageRef.split('@')[0] + `@${presetArg}` : packageRef;
   }
 
-  const deployInfos = await readDeployRecursive(packageRef, chainId);
+  let abis: viem.Abi[];
 
+  if (txHash) {
+    const chain = viem.extractChain({
+      chains,
+      id: chainId,
+    });
+
+    const publicClient = viem.createPublicClient({
+      chain,
+      // add --provider-url?
+      transport: viem.http(),
+    });
+
+    const tx = await publicClient.getTransaction({
+      hash: txHash,
+    });
+
+    // can't, really?
+    if (!tx.to) throw new Error("Can't decode a contract creation transaction.");
+
+    const bytecode = await publicClient.getCode({
+      address: tx.to,
+    });
+
+    abis = whatsabi.abiFromBytecode(bytecode!) as unknown as viem.Abi[];
+    data = [tx.input];
+  }
+
+  /*
+  const deployInfos = await readDeployRecursive(packageRef!, chainId);
   const abis = deployInfos.flatMap((deployData) => _getAbis(deployData));
-  const parsed = _parseData(abis, data);
+  */
+
+  const parsed = _parseData(abis!, data);
+
+  console.log('parsed: ', parsed);
 
   if (!parsed) {
-    const errorMessage = decodeTxError(data[0], abis);
+    const errorMessage = decodeTxError(data[0], abis!);
     if (errorMessage) {
       console.log(errorMessage);
       return;
