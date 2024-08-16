@@ -10,7 +10,7 @@ export default defineConfig({
     requestTimeout: 1000_000,
     responseTimeout: 1000_000,
     specPattern: '**/*.feature',
-    baseUrl: 'http://localhost:3000',
+    baseUrl: 'https://usecannon.com',
     video: false, // GH provides 2 CPUs, and cypress video eats one up, ref https://github.com/cypress-io/cypress/issues/20468#issuecomment-1307608025
     experimentalMemoryManagement: true, // better memory management, ref https://github.com/cypress-io/cypress/pull/2546
     supportFile: 'cypress/support/commands.ts',
