@@ -606,7 +606,7 @@ function QueueFromGitOps() {
                 <Radio colorScheme="teal" value="git">
                   Git URL
                 </Radio>
-                <Radio colorScheme="teal" value="stateUrl">
+                <Radio colorScheme="teal" value="partial">
                   IPFS Hash
                 </Radio>
               </Stack>
